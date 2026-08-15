@@ -2030,6 +2030,7 @@ function spread(){
   if(brk.kind==="preset"){
     var g = brk.groove;
     for(var i=0;i<ROWS;i++) rows[i] = { n:"S"+pad(g[i%g.length],2), i:inst, f:"", v:0 };
+    toast("SPREAD");
   } else {
     var span = Math.max(0.001, brk.end-brk.start), steps = brk.bars*16, over = 0;
     for(var i=0;i<brk.slices.length;i++){
@@ -2038,10 +2039,9 @@ function spread(){
       if(r>=ROWS){ over++; continue; }
       rows[r] = { n:"S"+pad(i+1,2), i:inst, f:"", v:0 };
     }
-    if(over) toast("2 BARS ONLY");
+    toast(over? "2 BARS ONLY" : "SPREAD");
   }
   touch();
-  if(brk.kind==="preset") toast("SPREAD");
   scrn = 1; mark();
 }
 
@@ -2051,7 +2051,7 @@ function drawInst(){
   rect(0,y0,W,h,BLUE);
   instSel = clamp(instSel,0,proj.inst.length-1);
   var it = proj.inst[instSel], def = INSTDEF[it.t];
-  stepper(0,y0,W-56,11, it.n+" "+def.lab,
+  stepper(0,y0,W-56,11, (it.n===def.lab? it.n : it.n+" "+def.lab),
     function(){ instSel=(instSel+proj.inst.length-1)%proj.inst.length; mark(); },
     function(){ instSel=(instSel+1)%proj.inst.length; mark(); });
   button(W-54,y0,26,11,"USE",function(){ proj.chan[chanSel].inst = instSel; chanCell(chanSel).i = instSel; touch(); toast("SET"); });
@@ -2061,7 +2061,8 @@ function drawInst(){
                brk:libFind(proj.chan[chanSel].brk), buf:null});
   });
 
-  var y = y0+14, rh = 14;
+  var y = y0+14;
+  var rh = clamp(Math.floor((h-26)/def.p.length), 14, 30);
   for(var i=0;i<def.p.length;i++){
     var pd = def.p[i], k = pd[0], lo = pd[1], hi = pd[2], st = pd[4];
     var v = it.p[k]; if(v==null) v = pd[3];
@@ -2071,15 +2072,15 @@ function drawInst(){
     else if(hi<=2.001&&st<0.1) disp = (Math.round(v*100)/100).toFixed(2);
     else if(st>=1) disp = ""+Math.round(v);
     else disp = (Math.round(v*1000)/1000).toFixed(3);
-    text(2,y+4,k,WHITE);
-    (function(it,k,lo,hi,st){
-      hbar(46,y,W-48,11,norm,null,disp,function(nv){
+    text(2,y+((rh-8)>>1),k,WHITE);
+    (function(it,k,lo,hi,st,y,rh){
+      hbar(46,y,W-48,rh-3,norm,null,disp,function(nv){
         var val = lo+nv*(hi-lo);
         val = Math.round(val/st)*st;
         it.p[k] = clamp(val,lo,hi);
         touch(); mark();
       });
-    })(it,k,lo,hi,st);
+    })(it,k,lo,hi,st,y,rh);
     y += rh;
   }
   text(2,y+4,"CH "+chanShort(chanSel)+" USES "+proj.inst[proj.chan[chanSel].inst].n, ORANGE);
