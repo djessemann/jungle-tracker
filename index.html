@@ -14,10 +14,20 @@
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230055AA'/%3E%3Cpath d='M2 2h12v2H2zM3 6h4v2H3zM9 6h4v2H9zM3 10h10v2H3z' fill='%23FF8800'/%3E%3C/svg%3E">
 <link rel="manifest" href="data:application/manifest+json,%7B%22name%22%3A%22DUBPLATE%22%2C%22short_name%22%3A%22DUBPLATE%22%2C%22display%22%3A%22standalone%22%2C%22orientation%22%3A%22any%22%2C%22background_color%22%3A%22%230055AA%22%2C%22theme_color%22%3A%22%230055AA%22%2C%22start_url%22%3A%22.%22%7D">
 <style>
+:root{
+  --sl:env(safe-area-inset-left,0px); --sr:env(safe-area-inset-right,0px);
+  --st:env(safe-area-inset-top,0px);  --sb:env(safe-area-inset-bottom,0px);
+}
 html,body{margin:0;padding:0;height:100%;background:#000;overflow:hidden;
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
   -webkit-tap-highlight-color:transparent;touch-action:none;overscroll-behavior:none;}
-canvas{display:block;position:fixed;left:0;top:0;width:100%;height:100%;touch-action:none;image-rendering:pixelated;image-rendering:-moz-crisp-edges;image-rendering:crisp-edges;}
+/* the app lives inside the safe area: the notch and the home indicator get
+   the black bezel, never a control */
+canvas{display:block;position:fixed;
+  left:var(--sl); top:var(--st);
+  width:calc(100% - var(--sl) - var(--sr));
+  height:calc(100% - var(--st) - var(--sb));
+  touch-action:none;image-rendering:pixelated;image-rendering:-moz-crisp-edges;image-rendering:crisp-edges;}
 #f{position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;}
 </style>
 </head>
@@ -89,10 +99,12 @@ function mark(){ dirty = true; }
 
 function resize(){
   var dpr = window.devicePixelRatio || 1;
-  var cw = window.innerWidth, ch = window.innerHeight;
+  /* the canvas is sized by CSS inside the safe area, so measure it, never
+     the window */
+  var r = cvs.getBoundingClientRect();
+  var cw = Math.max(1, r.width), ch = Math.max(1, r.height);
   var dw = Math.floor(cw*dpr), dh = Math.floor(ch*dpr);
   cvs.width = dw; cvs.height = dh;
-  cvs.style.width = cw+"px"; cvs.style.height = ch+"px";
   var target = (cw > 700) ? 400 : 250;          /* app pixels across */
   PIX = Math.max(1, Math.round(dw/target));
   W = Math.floor(dw/PIX); H = Math.floor(dh/PIX);
@@ -1476,7 +1488,7 @@ var lastCell = [];
 var drawer = null, recOn = false, sens = 0.5;
 var toastMsg = "", toastT = -9999;
 var confirmBox = null, keyboard = null;
-var TOP = 16, TAB = 18;
+var TOP = 20, TAB = 26;
 
 function toast(m){ toastMsg = m; toastT = now(); mark(); }
 function contentTop(){ return TOP+1; }
@@ -1525,7 +1537,7 @@ function stepper(x,y,w,h,label,dec,inc,onlab){
 function drawTransport(){
   rect(0,0,W,TOP,BLUE);
   rect(0,TOP-1,W,1,BLACK);
-  var bw = 20, y = 1, bh = TOP-3;
+  var bw = 24, y = 1, bh = TOP-3;
   button(1,y,bw,bh, I_PLAY, function(){ if(!play.on) transportStart(); }, play.on);
   button(1+bw+1,y,bw,bh, I_STOP, function(){ transportStop(); });
   button(1+(bw+1)*2,y,bw,bh, I_REC, function(){ recOn=!recOn; if(recOn&&!play.on) transportStart(); }, recOn);
