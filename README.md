@@ -27,6 +27,8 @@ drag any marker, then FILL BEAT to lay the break across the grid.
 
 **SAVE** — save, load, rename, render to WAV, send the whole thing as a `.json`.
 
+**?** — the manual, in plain words, on a page inside the app.
+
 **A B C D** in the top bar are four scenes. Tap one while stopped and you jump
 there; tap while playing and it lands on the next bar. CHN chains whatever
 scenes have something in them.
@@ -72,6 +74,7 @@ as a starter bank. The folder is gitignored and the published build ships empty.
 
 ## Files
 
-`index.html` — the whole app · `CLAUDE.md` — how it is built · `bake.py` — the
-starter-bank baker · `dubplateplan.md` — the original tracker spec this grew
-out of, before it was stripped back for the phone.
+`index.html` — the whole app · `HOWTO.md` — the manual, same words as the **?**
+page in the app · `CLAUDE.md` — how it is built · `bake.py` — the starter-bank
+baker · `dubplateplan.md` — the original tracker spec this grew out of, before
+it was stripped back for the phone.

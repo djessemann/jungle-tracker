@@ -39,6 +39,9 @@ Three tabs and one transport bar. That is the whole surface.
 - **BREAK** — the library. Browse presets and your imports, LOAD more, slice
   8/16/32 or AUTO (transients), drag markers, FILL BEAT.
 - **SAVE** — save, load, name, render, and the machine line.
+- **?** — the manual, in plain words. Narrow tab at the right of the tab bar.
+  It is the one place in the app that uses sentences; everywhere else the copy
+  rules hold.
 
 Scenes A B C D live in the transport bar. Tapping one while stopped switches
 immediately; while playing it queues and lands on the next bar (the pending
@@ -51,7 +54,7 @@ Read it top to bottom; the sections are in dependency order.
 
 | Section | What it holds |
 |---|---|
-| FONT | `FONTDATA` — 5x7 glyphs in a 6x8 cell, rows base32 encoded, bit 16 leftmost. Codes 32-95 are ASCII (uppercase only), 96-111 are icons. `buildFont()` renders one atlas canvas per palette colour. |
+| FONT | `FONTDATA` — 5x7 glyphs in a 6x8 cell, rows base32 encoded, bit 16 leftmost. Codes 32-95 are ASCII, 97-122 lower case, 123-138 icons (`I_PLAY` and friends, built with `ic()`). `buildFont()` renders one atlas canvas per palette colour. Lower case exists for the ? page only; the interface itself stays in caps. |
 | GFX | `resize()` places and sizes the canvas, then picks `PIX` (device pixels per app pixel) so the app grid is ~250 px wide on phones, ~400 on tablets. All drawing is in app pixels. Immediate-mode widgets push hit `regions` each frame; pointer events pick the topmost. `insets()` is the safe area (see below). |
 | AUDIO | `createEngine(ac)` builds the whole graph and is called for both the live context and the `OfflineAudioContext` renderer. Master: gain → soft-clip waveshaper → compressor. Sends: tempo-synced dub delay with a lowpass in the feedback loop, and a convolver reverb with a generated dark impulse. Four channel strips, one per lane. |
 | INSTRUMENTS | `trigger(E,o)` dispatches by `inst.t`. `monoVoice` handles the bass with voice steal and glide. `INSTDEF` still describes every parameter; the app now picks fixed values in `buildInst()` instead of exposing them. |
@@ -60,6 +63,7 @@ Read it top to bottom; the sections are in dependency order.
 | SAMPLES | Import pipeline: trim → snap to first transient → `analyzeTempo` → bars/BPM → slice. `findOnsets` is amplitude-flux with an adaptive threshold; `analyzeTempo` autocorrelates that flux and then snaps to a whole number of bars. |
 | STORE | IndexedDB (`projects`, `library`), JSON export with the break embedded as base64 WAV, `renderWAV()` offline render. |
 | UI / SCREENS | Transport, tabs, widgets, then `drawBeat` / `drawBreak` / `drawSave`. |
+| HELP | `HELP` is the ? page, written as paragraphs and wrapped to the screen at draw time. Lines starting with `#` are headings. **The same words live in `HOWTO.md`; change both.** |
 | DEMO / BOOT | `demoProject()` builds the two scenes that play on first load. `BAKED` is the starter-bank hook (see below). |
 
 ## Data model

@@ -34,10 +34,11 @@ canvas{display:block;position:fixed;left:0;top:0;touch-action:none;
 <input id="f" type="file" multiple accept="audio/*,.wav,.aif,.aiff,.mp3,.m4a,.ogg,.flac,.json">
 <script>
 "use strict";
-var BUILD = "0817D";   /* bumped on every deploy, shown on the DISK screen */
+var BUILD = "0817E";   /* bumped on every deploy, shown on the DISK screen */
 /* ---------------------------------------------------------------- FONT
    5x7 pixel glyphs in a 6x8 cell. Rows encoded base32, bit 16 = leftmost.
-   Codes 32..95 are ASCII (uppercase only). 96..111 are icons.          */
+   Codes 32..95 are ASCII, 97..122 are lower case, 123..138 are icons.
+   Lower case is only used on the ? page; the interface itself is caps.  */
 var FONTDATA =
 /* 32 */ "0000000"+"4444404"+"AA00000"+"AAVAVAA"+"4FKE5U4"+"PP248JJ"+"CIK8LID"+"4400000"+
 /* 40 */ "2488842"+"8422248"+"0A4V4A0"+"044V440"+"0000048"+"000V000"+"0000004"+"01248G0"+
@@ -47,16 +48,22 @@ var FONTDATA =
 /* 72 */ "HHHVHHH"+"V44444V"+"722229C"+"HIKOKIH"+"GGGGGGV"+"HRLHHHH"+"HPLJHHH"+"EHHHHHE"+
 /* 80 */ "UHHUGGG"+"EHHHLID"+"UHHUKIH"+"FGGE11U"+"V444444"+"HHHHHHE"+"HHHHHA4"+"HHHHLRH"+
 /* 88 */ "HHA4AHH"+"HHHA444"+"V1248GV"+"E88888E"+"0G84210"+"E22222E"+"4AH0000"+"000000V"+
-/* 96 */ "GOSUSOG"+"0VVVVV0"+"0EVVVE0"+"137F731"+"GOSUSOG"+"044EEV0"+"0VEE440"+"0129A40"+
-/*104 */ "0HA4AH0"+"00EEE00"+"0RRRRR0"+"VVVVVVV"+"LALALAL"+"ALALALA"+"VHLHVE0"+"0EHHHE0";
+/* 96 */ "0000000"+
+/* 97 a */ "00E1FHF"+"GGUHHHU"+"00EGGGE"+"11FHHHF"+"00EHVGE"+"78U8888"+"00FHF1E"+"GGUHHHH"+
+/*105 i */ "40C444E"+"202229C"+"GGIKOKI"+"C44444E"+"00RLLLL"+"00UHHHH"+"00EHHHE"+"00UHHUG"+
+/*113 q */ "00FHHF1"+"00NOGGG"+"00FGE1U"+"88U8896"+"00HHHHF"+"00HHHA4"+"00HHLLA"+"00HA4AH"+
+/*121 y */ "00HHF1E"+"00V248V"+
+/*123 icons */ "GOSUSOG"+"0VVVVV0"+"0EVVVE0"+"137F731"+"GOSUSOG"+"044EEV0"+"0VEE440"+"0129A40"+
+/*131 */      "0HA4AH0"+"00EEE00"+"0RRRRR0"+"VVVVVVV"+"LALALAL"+"ALALALA"+"VHLHVE0"+"0EHHHE0";
 
 var B32 = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
-var GW = 6, GH = 8, NGLYPH = 80;
+var GW = 6, GH = 8, NGLYPH = 107;
 
-/* icon characters */
-var I_PLAY="`", I_STOP="a", I_REC="b", I_LT="c", I_RT="d", I_UP="e", I_DN="f",
-    I_OK="g", I_X="h", I_DOT="i", I_PAUSE="j", I_BLOCK="k", I_DITH="l", I_DITH2="m",
-    I_DISK="n", I_KNOB="o";
+/* icon characters, codes 123 and up */
+function ic(n){ return String.fromCharCode(123+n); }
+var I_PLAY=ic(0), I_STOP=ic(1), I_REC=ic(2), I_LT=ic(3), I_RT=ic(4), I_UP=ic(5), I_DN=ic(6),
+    I_OK=ic(7), I_X=ic(8), I_DOT=ic(9), I_PAUSE=ic(10), I_BLOCK=ic(11), I_DITH=ic(12),
+    I_DITH2=ic(13), I_DISK=ic(14), I_KNOB=ic(15);
 
 /* Amiga Workbench 1.3 palette */
 var PAL = ["#000000","#FFFFFF","#0055AA","#FF8800"];
@@ -1646,15 +1653,19 @@ function drawTransport(){
     function(){ proj.chain = !proj.chain; touch(); mark(); }, proj.chain);
 }
 function drawTabs(){
-  var y = H-TAB, w = Math.floor(W/3);
+  var y = H-TAB, hw = 26, w = Math.floor((W-hw)/3);
   rect(0,y,W,TAB,BLUE);
   for(var i=0;i<3;i++){
-    var x = i*w, ww = (i===2? W-x : w);
+    var x = i*w, ww = (i===2? W-hw-x : w);
     var on = (scrn===i);
     panel(x,y+1,ww,TAB-1,on?WHITE:BLUE,on);
     textC(x,y+((TAB-7)>>1),ww,SCR[i],on?BLUE:WHITE);
     (function(i){ hit(x,y,ww,TAB,{tap:function(){ scrn=i; mark(); }}); })(i);
   }
+  var hx2 = W-hw, hon = (scrn===3);
+  panel(hx2,y+1,hw,TAB-1,hon?WHITE:BLUE,hon);
+  textC(hx2,y+((TAB-7)>>1),hw,"?",hon?BLUE:ORANGE);
+  hit(hx2,y,hw,TAB,{tap:function(){ scrn=3; mark(); }});
 }
 function drawToast(){
   if(now()-toastT>1600||!toastMsg) return;
@@ -2031,6 +2042,115 @@ function drawSave(){
   }
   drawStatus(y0+h-8);
 }
+/* ----------------------------------------------------------------- HELP
+   Lines starting with # are headings. Everything wraps to the screen at
+   draw time, so the source is written as paragraphs.
+   Keep this in step with HOWTO.md.                                      */
+var HELP = [
+"#PLAY",
+"Press the triangle. There is already a tune in there. Press it again to stop.",
+"",
+"#THE GRID",
+"Four rows. BREAK is the drums, BASS is the low end, STAB is the chords, FX is sirens and crashes.",
+"Sixteen squares across is one bar of music.",
+"",
+"#MAKING A BEAT",
+"Tap a pad at the bottom. You hear it, and it is now the sound in your hand.",
+"Tap squares in that row to put it there.",
+"Tap a square again to take it out. Hold a square to wipe whatever is in it.",
+"",
+"#ROWS",
+"Tap a row name to work on that row. The pads change with it.",
+"Hold a row name to mute the row. Hold it again to bring it back.",
+"",
+"#REV AND ROLL",
+"Turn REV on and the squares you tap play backwards.",
+"Turn ROLL on and they stutter three times, like a snare roll.",
+"They stay on until you turn them off, so you can paint a run of them.",
+"",
+"#A B C D",
+"Four versions of the same sixteen steps.",
+"Tap one to go there. If it is playing, your tap waits for the bar to finish, and the one you asked for goes orange until it lands.",
+"CHN plays every version that has something in it, round and round.",
+"",
+"#YOUR OWN BREAK",
+"Go to BREAK and press LOAD. Pick any drum loop off your phone.",
+"It gets trimmed, timed and cut into slices for you.",
+"Press FILL BEAT and the slices land on the grid in the right order, at your tempo.",
+"Now move them around. That is the whole game.",
+"",
+"#CUTTING IT UP",
+"8, 16 and 32 cut the loop into even pieces. AUTO cuts on the hits instead, and SENS is how fussy AUTO is.",
+"Drag any line on the picture to move a cut. Tap a slice to hear it.",
+"BARS is how long the loop is. If it sounds half speed or double speed, change it.",
+"USE BPM sets the tune to the speed of the break.",
+"",
+"#SOUND",
+"VOL, TONE and FX belong to the row you are on. FX is delay and reverb.",
+"The number at the top is the tempo. Drag it up or down.",
+"SWING on the SAVE page loosens the timing.",
+"",
+"#KEEPING IT",
+"It saves itself as you go. SAVE gives it a name and keeps it in the list.",
+"WAV makes an audio file of the loop.",
+"SEND makes one file with your break inside it, so you can move it somewhere else.",
+"",
+"#WHAT IS IN IT",
+"The eight built in breaks are not recordings. They are the rhythms played on a drum machine that lives in the app, so nobody's record is in here.",
+"Your imports are yours.",
+""
+];
+
+var helpScroll = 0, helpWrap = null, helpWrapW = 0;
+function wrapHelp(cols){
+  if(helpWrap && helpWrapW===cols) return helpWrap;
+  var out = [];
+  for(var i=0;i<HELP.length;i++){
+    var s = HELP[i];
+    if(!s){ out.push({t:"", h:0}); continue; }
+    var head = (s.charAt(0)==="#");
+    if(head) s = s.substr(1);
+    var words = s.split(" "), line = "";
+    for(var w=0;w<words.length;w++){
+      var t = line? line+" "+words[w] : words[w];
+      if(t.length>cols && line){ out.push({t:line, h:head}); line = words[w]; }
+      else line = t;
+    }
+    if(line) out.push({t:line, h:head});
+  }
+  helpWrap = out; helpWrapW = cols;
+  return out;
+}
+function drawHelp(){
+  var y0 = contentTop(), h = contentH();
+  rect(0,y0,W,h,BLUE);
+  var pad2 = 3, cols = Math.floor((W-pad2*2-5)/GW), lh = 10;
+  var lines = wrapHelp(cols);
+  var total = lines.length*lh + 10;
+  helpScroll = clamp(helpScroll, 0, Math.max(0,total-h));
+  var y = y0 - helpScroll + 3;
+  for(var i=0;i<lines.length;i++){
+    if(y>=y0-1 && y<=y0+h-9){          /* whole lines only, never a half one */
+      if(lines[i].h){
+        rect(0,y-1,W-6,10,ORANGE);
+        text(pad2,y,lines[i].t,BLUE);
+      } else text(pad2,y,lines[i].t,WHITE);
+    }
+    y += lh;
+  }
+  /* the scrollbar tells you there is more */
+  if(total>h){
+    var bx = W-5;
+    rect(bx,y0,5,h,BLUE);
+    panel(bx,y0,5,h,BLUE,true);
+    var kh = Math.max(10, Math.round(h*h/total));
+    var ky = y0 + Math.round((h-kh)*helpScroll/(total-h));
+    rect(bx+1,ky,3,kh,ORANGE);
+  }
+  hit(0,y0,W,h,{
+    drag:function(lx,ly,dx,dy){ helpScroll = clamp(helpScroll-dy, 0, Math.max(0,total-h)); mark(); }
+  });
+}
 /* --------------------------------------------------------------- DEMO */
 function demoProject(blank){
   var p = newProject(blank?"UNTITLED":"DUBPLATE");
@@ -2155,6 +2275,7 @@ function draw(){
   rect(0,0,W,H,BLUE);
   if(scrn===1) drawBreak();
   else if(scrn===2) drawSave();
+  else if(scrn===3) drawHelp();
   else drawBeat();
   drawTransport();
   drawTabs();
