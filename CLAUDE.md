@@ -28,7 +28,7 @@ Read it top to bottom; the sections are in dependency order.
 | Section | What it holds |
 |---|---|
 | FONT | `FONTDATA` — 5x7 glyphs in a 6x8 cell, rows base32 encoded, bit 16 leftmost. Codes 32-95 are ASCII (uppercase only), 96-111 are icons (`I_PLAY`, `I_STOP`, …). `buildFont()` renders one atlas canvas per palette colour. |
-| GFX | `resize()` picks `PIX` (device pixels per app pixel) so the app grid is ~250 px wide on phones, ~400 on tablets. All drawing is in app pixels. `rect/frame/bevel/panel/dither/text`. Immediate-mode widgets push hit `regions` each frame; pointer events pick the topmost. |
+| GFX | `resize()` places and sizes the canvas, then picks `PIX` (device pixels per app pixel) so the app grid is ~250 px wide on phones, ~400 on tablets. All drawing is in app pixels. `rect/frame/bevel/panel/dither/text`. Immediate-mode widgets push hit `regions` each frame; pointer events pick the topmost. `insets()` is the safe area (see below). |
 | AUDIO | `createEngine(ac)` builds the whole graph and is called for both the live context and the `OfflineAudioContext` renderer. Master: gain → soft-clip waveshaper → compressor. Sends: tempo-synced dub delay with a lowpass in the feedback loop, and a convolver reverb with a generated dark impulse. Six channel strips: in → lowpass → crush waveshaper → post-crush lowpass → vol → dry + 2 sends. |
 | INSTRUMENTS | `INSTDEF` is the parameter schema; the INST screen renders itself from it, so adding a parameter is a one-line change. `trigger(E,o)` dispatches by `inst.t`. `monoVoice` handles SUB / REESE / WOBBLE with voice steal and glide. |
 | BREAKS | `PRESETS` — eight breaks, each a 16-slice map over the synth kit plus a 32-row groove. `LIB` holds presets first, then imports. Preset and sampled breaks share the same note column (`S01`-`S32`), so any pattern plays with any break. |
@@ -71,6 +71,29 @@ Read it top to bottom; the sections are in dependency order.
   to `.stop()`. Both throw and kill the whole scheduler tick.
 - Do not shadow window globals with `var` at top level (`screen`, `stop`,
   `name`, `length`, `status`). `scrn` is named that way for this reason.
+
+## iOS home screen
+
+Two things bite once the app is added to the home screen, and both are handled
+in code because neither can be fixed from CSS alone.
+
+- **Safe area.** Added to the home screen, iOS reports
+  `safe-area-inset-bottom: 0` while still drawing the home indicator over the
+  page. `insets()` reads what iOS reports through the hidden `#sa` probe and
+  then applies a floor of its own — 28 css px portrait, 16 landscape — when the
+  window covers the whole screen (`coversScreen()`) on a gesture-bar phone
+  (`gestureBar()`). A real reported inset always wins, so a device that says 34
+  gets 34 and never doubles up. `resize()` places the canvas from those numbers;
+  nothing about the layout comes from `env()` in CSS.
+- **Stale copy.** iOS keeps the HTML it installed, so a deploy can go unseen for
+  days. `var BUILD` at the top of the file is the stamp; `checkUpdate()` fetches
+  the page once per session with `cache:"reload"`, compares the stamp and
+  reloads if it changed (guarded by `sessionStorage` so it can never loop).
+  **Bump `BUILD` on every deploy** or the check is useless.
+
+The DISK screen prints `B<build> T<top> B<bottom> <screen> <grid> SA` along the
+bottom. That line is the first thing to ask for when a layout bug is reported
+from a phone — it says which build is running and what iOS claimed.
 
 ## Starter bank
 

@@ -34,6 +34,7 @@ canvas{display:block;position:fixed;left:0;top:0;touch-action:none;
 <input id="f" type="file" multiple accept="audio/*,.wav,.aif,.aiff,.mp3,.m4a,.ogg,.flac,.json">
 <script>
 "use strict";
+var BUILD = "0817C";   /* bumped on every deploy, shown on the DISK screen */
 /* ---------------------------------------------------------------- FONT
    5x7 pixel glyphs in a 6x8 cell. Rows encoded base32, bit 16 = leftmost.
    Codes 32..95 are ASCII (uppercase only). 96..111 are icons.          */
@@ -102,21 +103,32 @@ function standalone(){
             || window.matchMedia("(display-mode: fullscreen)").matches; }catch(e){}
   return false;
 }
-/* a phone with a home indicator: tall and narrow, 812 css px or more */
+/* a phone with a home indicator: tall, narrow, and phone sized */
 function gestureBar(){
   var mx = Math.max(screen.width,screen.height), mn = Math.min(screen.width,screen.height);
-  return mx>=812 && mn>0 && (mx/mn)>1.8;
+  return mn>0 && mx>=812 && mx<=1100 && (mx/mn)>1.8;
 }
-/* iOS standalone reports no bottom inset on some builds even though the home
-   indicator sits over the page, so keep a floor of our own. */
+/* does the window own the whole screen? then any system overlay - status bar,
+   home indicator - is sitting on top of us, whatever env() claims */
+function coversScreen(){
+  if(!window.screen||!screen.height) return false;
+  var land = window.innerWidth > window.innerHeight;
+  var sh = land? Math.min(screen.width,screen.height) : Math.max(screen.width,screen.height);
+  return window.innerHeight >= sh-4;
+}
+/* iOS reports no bottom inset for the home indicator in a home screen app, so
+   keep a floor of our own. A real inset always wins. */
 function insets(){
   var cs = window.getComputedStyle(saProbe);
   var i = { t:parseFloat(cs.paddingTop)||0,  r:parseFloat(cs.paddingRight)||0,
             b:parseFloat(cs.paddingBottom)||0, l:parseFloat(cs.paddingLeft)||0 };
-  if(standalone() && gestureBar()){
+  var covers = coversScreen();
+  if(gestureBar() && (covers || standalone())){
     var land = window.innerWidth > window.innerHeight;
     i.b = Math.max(i.b, land? 16 : 28);
-    i.t = Math.max(i.t, land? 2 : 4);
+    /* covering the screen with nothing reported at the top means the status
+       bar is drawn over the page */
+    i.t = Math.max(i.t, land? 2 : (covers? 44 : 4));
   }
   return i;
 }
@@ -2174,6 +2186,13 @@ function applyMix(){
 
 /* -------------------------------------------------------------- DISK */
 var projList = [], listLoaded = false;
+/* the machine line: build, the insets iOS reports, screen, display mode */
+function drawStatus(y){
+  var i = insets();
+  var s = "B"+BUILD+" T"+Math.round(i.t)+" B"+Math.round(i.b)+
+          " "+screen.width+"X"+screen.height+" "+W+"X"+H+(standalone()?" SA":"");
+  text(2,y,s,ORANGE);
+}
 function refreshList(){ dbAll("projects",function(r){ projList = r; listLoaded = true; mark(); }); }
 function drawDisk(){
   var y0 = contentTop(), h = contentH();
@@ -2199,6 +2218,7 @@ function drawDisk(){
   y += 16;
   text(2,y,proj.name.substr(0,16),ORANGE);
   text(W-tw("SONGS")-2,y,"SONGS",WHITE);
+  drawStatus(y0+h-8);
   y += 10;
   rect(0,y-2,W,1,BLACK);
   for(var i=0;i<projList.length && y<y0+h-12;i++){
@@ -2447,6 +2467,26 @@ function onMIDI(e){
   mark();
 }
 
+/* ------------------------------------------------------------- UPDATE
+   A home screen app keeps the copy iOS installed, so the page checks the
+   server for a newer build once per session and reloads itself. */
+function checkUpdate(){
+  if(!window.fetch) return;
+  if(location.protocol!=="http:"&&location.protocol!=="https:") return;
+  try{ if(sessionStorage.getItem("dp.upd")) return; }catch(e){}
+  fetch(location.pathname, {cache:"reload"}).then(function(r){
+    return r.ok? r.text() : null;
+  }).then(function(t){
+    if(!t) return;
+    var m = /var BUILD = "([^"]+)"/.exec(t);
+    if(!m || m[1]===BUILD) return;
+    try{ sessionStorage.setItem("dp.upd","1"); }catch(e){}
+    autosave();
+    toast("NEW BUILD");
+    setTimeout(function(){ location.reload(); }, 1200);
+  })["catch"](function(){});
+}
+
 /* --------------------------------------------------------------- BOOT */
 var unlocked = false;
 function audioUnlock(){
@@ -2513,6 +2553,7 @@ function boot(){
   loadBaked();
   dbOpen(function(){ dbLoadLib(function(){ restoreLast(); mark(); }); });
   setInterval(autosave, 30000);
+  setTimeout(checkUpdate, 4000);
   window.addEventListener("blur", function(){ autosave(); });
   document.addEventListener("visibilitychange", function(){ if(document.hidden) autosave(); });
   frameLoop();
