@@ -14,24 +14,22 @@
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230055AA'/%3E%3Cpath d='M2 2h12v2H2zM3 6h4v2H3zM9 6h4v2H9zM3 10h10v2H3z' fill='%23FF8800'/%3E%3C/svg%3E">
 <link rel="manifest" href="data:application/manifest+json,%7B%22name%22%3A%22DUBPLATE%22%2C%22short_name%22%3A%22DUBPLATE%22%2C%22display%22%3A%22standalone%22%2C%22orientation%22%3A%22any%22%2C%22background_color%22%3A%22%230055AA%22%2C%22theme_color%22%3A%22%230055AA%22%2C%22start_url%22%3A%22.%22%7D">
 <style>
-:root{
-  --sl:env(safe-area-inset-left,0px); --sr:env(safe-area-inset-right,0px);
-  --st:env(safe-area-inset-top,0px);  --sb:env(safe-area-inset-bottom,0px);
-}
 html,body{margin:0;padding:0;height:100%;background:#000;overflow:hidden;
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
   -webkit-tap-highlight-color:transparent;touch-action:none;overscroll-behavior:none;}
 /* the app lives inside the safe area: the notch and the home indicator get
-   the black bezel, never a control */
-canvas{display:block;position:fixed;
-  left:var(--sl); top:var(--st);
-  width:calc(100% - var(--sl) - var(--sr));
-  height:calc(100% - var(--st) - var(--sb));
-  touch-action:none;image-rendering:pixelated;image-rendering:-moz-crisp-edges;image-rendering:crisp-edges;}
+   the black bezel, never a control. resize() places the canvas. */
+canvas{display:block;position:fixed;left:0;top:0;touch-action:none;
+  image-rendering:pixelated;image-rendering:-moz-crisp-edges;image-rendering:crisp-edges;}
+/* env() is only readable from script through a probe */
+#sa{position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;
+  padding-top:env(safe-area-inset-top,0px);padding-right:env(safe-area-inset-right,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);padding-left:env(safe-area-inset-left,0px);}
 #f{position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;}
 </style>
 </head>
 <body>
+<div id="sa"></div>
 <canvas id="c"></canvas>
 <input id="f" type="file" multiple accept="audio/*,.wav,.aif,.aiff,.mp3,.m4a,.ogg,.flac,.json">
 <script>
@@ -97,12 +95,39 @@ var W = 240, H = 400, PIX = 3;
 var dirty = true;
 function mark(){ dirty = true; }
 
+var saProbe = document.getElementById("sa");
+function standalone(){
+  if(window.navigator.standalone===true) return true;
+  try{ return window.matchMedia("(display-mode: standalone)").matches
+            || window.matchMedia("(display-mode: fullscreen)").matches; }catch(e){}
+  return false;
+}
+/* a phone with a home indicator: tall and narrow, 812 css px or more */
+function gestureBar(){
+  var mx = Math.max(screen.width,screen.height), mn = Math.min(screen.width,screen.height);
+  return mx>=812 && mn>0 && (mx/mn)>1.8;
+}
+/* iOS standalone reports no bottom inset on some builds even though the home
+   indicator sits over the page, so keep a floor of our own. */
+function insets(){
+  var cs = window.getComputedStyle(saProbe);
+  var i = { t:parseFloat(cs.paddingTop)||0,  r:parseFloat(cs.paddingRight)||0,
+            b:parseFloat(cs.paddingBottom)||0, l:parseFloat(cs.paddingLeft)||0 };
+  if(standalone() && gestureBar()){
+    var land = window.innerWidth > window.innerHeight;
+    i.b = Math.max(i.b, land? 16 : 28);
+    i.t = Math.max(i.t, land? 2 : 4);
+  }
+  return i;
+}
+
 function resize(){
   var dpr = window.devicePixelRatio || 1;
-  /* the canvas is sized by CSS inside the safe area, so measure it, never
-     the window */
-  var r = cvs.getBoundingClientRect();
-  var cw = Math.max(1, r.width), ch = Math.max(1, r.height);
+  var ins = insets();
+  var cw = Math.max(1, window.innerWidth - ins.l - ins.r);
+  var ch = Math.max(1, window.innerHeight - ins.t - ins.b);
+  cvs.style.left = ins.l+"px"; cvs.style.top = ins.t+"px";
+  cvs.style.width = cw+"px";   cvs.style.height = ch+"px";
   var dw = Math.floor(cw*dpr), dh = Math.floor(ch*dpr);
   cvs.width = dw; cvs.height = dh;
   var target = (cw > 700) ? 400 : 250;          /* app pixels across */
