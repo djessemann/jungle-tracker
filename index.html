@@ -34,7 +34,7 @@ canvas{display:block;position:fixed;left:0;top:0;touch-action:none;
 <input id="f" type="file" multiple accept="audio/*,.wav,.aif,.aiff,.mp3,.m4a,.ogg,.flac,.json">
 <script>
 "use strict";
-var BUILD = "0817C";   /* bumped on every deploy, shown on the DISK screen */
+var BUILD = "0817D";   /* bumped on every deploy, shown on the DISK screen */
 /* ---------------------------------------------------------------- FONT
    5x7 pixel glyphs in a 6x8 cell. Rows encoded base32, bit 16 = leftmost.
    Codes 32..95 are ASCII (uppercase only). 96..111 are icons.          */
@@ -290,8 +290,7 @@ function now(){ return (typeof performance!=="undefined"?performance.now():Date.
    The engine is a factory so the offline renderer can build an identical
    graph in an OfflineAudioContext.                                      */
 
-var NCH = 6;
-var CHNAME = ["BRK1","BRK2","SUB","REESE","STAB","FX"];
+var NCH = 4;   /* one strip per lane: BREAK BASS STAB FX */
 
 function noteFreq(m){ return 440*Math.pow(2,(m-69)/12); }
 var NOTENAMES = ["C-","C#","D-","D#","E-","F-","F#","G-","G#","A-","A#","B-"];
@@ -756,7 +755,8 @@ function scheduleMonoOff(E, ch, when, ip){
    same note column, so every pattern works with any break.              */
 
 var KITLIST = ["KICK8","BOOM","KICK","SNARE","SNR2","GHOST","RIM","CLAP","HAT","OHAT",
-               "RIDE","CRASH","SHAKE","TAMB","TOM","TOMLO","BONGO","CONGA","CLICK","STICK"];
+               "RIDE","CRASH","SHAKE","TAMB","TOM","TOMLO","BONGO","CONGA","CLICK","STICK",
+               "RISE","DROP"];
 
 function seq16(){ return [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]; }
 function groove(bar2){ return seq16().concat(bar2); }
@@ -871,132 +871,140 @@ function playBreak(E,o,gain,semis){
   if(fx.T!=null && fx.T>0) grain = { size: 0.012+fx.T*0.10, dur: Math.max(0.05,o.dur*gate) };
   playBuf(E, buf, out, t, start, len, rate, gain*(s.g==null?1:s.g), rev, grain);
 }
-/* ------------------------------------------------------------ PROJECT */
-var ROWS = 32, TPR = 6;
+/* --------------------------------------------------------------- MODEL
+   Four lanes, sixteen steps, four scenes. A step holds one palette value
+   plus two flags. There is no note column, no hex, no song grid.        */
+
+var NLANE = 4, STEPS = 16, NSCENE = 4;
+var LANE = ["BREAK","BASS","STAB","FX"];
+var SCENEID = ["A","B","C","D"];
+
+/* the bass palette is a minor scale, so nothing lands wrong */
+var SCALE = [0,3,5,7,10,12,15,17];
+var KEYNAME = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+/* stab palette: the chords of that scale */
+var STABROOT = [0,3,5,7,8,10], STABTYPE = [1,2,1,1,2,2];
+var FXPAD = [
+  {n:"SIREN", t:"siren"}, {n:"HOOVER",t:"hoov"},
+  {n:"CRASH", t:"kit", d:"CRASH"}, {n:"RISE", t:"kit", d:"RISE"},
+  {n:"DROP",  t:"kit", d:"DROP"},  {n:"CLAP", t:"kit", d:"CLAP"},
+  {n:"RIM",   t:"kit", d:"RIM"},   {n:"REV",  t:"rev"}
+];
+
 var proj = null, E = null, ac = null;
-var play = { on:false, pos:0, row:0, next:0, sched:[], startedAt:0 };
+var play = { on:false, scene:0, step:0, next:0, sched:[], queue:-1 };
 var metOn = false;
 
-function newCell(){ return {n:null,i:0,f:"",v:0}; }
-function emptyRows(){ var r=[]; for(var i=0;i<ROWS;i++) r.push(null); return r; }
+function emptyLane(){ var a=[]; for(var i=0;i<STEPS;i++) a.push(null); return a; }
+function emptyScene(){ var s=[]; for(var l=0;l<NLANE;l++) s.push(emptyLane()); return s; }
 
 function newProject(name){
-  var p = { name:name||"UNTITLED", bpm:170, swing:0, master:0.85, inst:[], chan:[], pat:[], song:[], ver:1 };
-  p.inst = [
-    {t:"brk",  n:"BREAK", p:instDefaults("brk")},
-    {t:"sub",  n:"SUB",   p:instDefaults("sub")},
-    {t:"reese",n:"REESE", p:instDefaults("reese")},
-    {t:"chord",n:"STAB",  p:instDefaults("chord")},
-    {t:"hoov", n:"HOOVER",p:instDefaults("hoov")},
-    {t:"pad",  n:"PAD",   p:instDefaults("pad")},
-    {t:"siren",n:"SIREN", p:instDefaults("siren")},
-    {t:"kit",  n:"KIT",   p:instDefaults("kit")},
-    {t:"wob",  n:"WOBBLE",p:instDefaults("wob")},
-    {t:"smp",  n:"SMP",   p:instDefaults("smp")}
-  ];
-  var defInst = [0,0,1,2,3,6];
-  for(var c=0;c<NCH;c++){
-    p.chan.push({ inst:defInst[c], brk:(c<2?"p"+c:"p0"), vol:0.8, cut:1, res:0.1,
-                  crush:0, dly:(c===4?0.25:(c===5?0.35:0)), rev:(c===4?0.2:0.05), mute:false, solo:false });
-  }
-  for(var i=0;i<256;i++) p.pat.push(null);
+  var p = { name:name||"UNTITLED", bpm:170, swing:14, master:0.85, key:0,
+            brk:"p0", chain:true, scenes:[], lane:[], ver:2 };
+  for(var s=0;s<NSCENE;s++) p.scenes.push(emptyScene());
+  p.lane = [ {vol:0.85, tone:1,    fx:0.08, mute:false},
+             {vol:0.90, tone:1,    fx:0.00, mute:false},
+             {vol:0.55, tone:0.72, fx:0.30, mute:false},
+             {vol:0.55, tone:1,    fx:0.35, mute:false} ];
   return p;
 }
-function patNew(ch){
-  for(var i=0;i<256;i++) if(!proj.pat[i]){ proj.pat[i] = {ch:ch, rows:emptyRows()}; return i; }
-  return -1;
+function stepAt(sc,l,i){ return proj.scenes[sc][l][i]; }
+function setStep(sc,l,i,v,r,o){
+  proj.scenes[sc][l][i] = (v==null)? null : {v:v, r:r?1:0, o:o?1:0};
+  touch();
 }
-function patClone(id){
-  var s = proj.pat[id]; if(!s) return -1;
-  var n = patNew(s.ch); if(n<0) return -1;
-  for(var i=0;i<ROWS;i++) proj.pat[n].rows[i] = s.rows[i]? {n:s.rows[i].n,i:s.rows[i].i,f:s.rows[i].f,v:s.rows[i].v} : null;
-  return n;
+function laneEmpty(sc,l){
+  for(var i=0;i<STEPS;i++) if(proj.scenes[sc][l][i]) return false;
+  return true;
 }
-function songRow(){ var a=[]; for(var i=0;i<NCH;i++) a.push(-1); return a; }
-
-/* ------------------------------------------------------------- TIMING */
-function rowDur(){ return 60/proj.bpm/4; }
-function rowTime(r){ return (r&1) ? rowDur()*(proj.swing/100)*0.5 : 0; }
-
-function fxOf(cell){
-  var o = {};
-  if(!cell||!cell.f) return o;
-  var v = cell.v|0;
-  switch(cell.f){
-    case "9": o.O = v/256; break;
-    case "R": o.R = Math.max(1,v); break;
-    case "B": o.B = 1; break;
-    case "P": o.P = (v>127? v-256 : v); break;
-    case "G": o.G = v*0.004; break;
-    case "C": o.C = v/255; break;
-    case "T": o.T = v/255; break;
-    case "V": o.V = v/128; break;
-  }
-  return o;
+function sceneEmpty(sc){
+  for(var l=0;l<NLANE;l++) if(!laneEmpty(sc,l)) return false;
+  return true;
 }
-function cellAt(ch, pos, row){
-  if(pos<0||pos>=proj.song.length) return null;
-  var id = proj.song[pos][ch];
-  if(id<0||!proj.pat[id]) return null;
-  return proj.pat[id].rows[row];
-}
-/* rows until the next event on this channel, plus whether it glides */
-function lookahead(ch,pos,row){
-  var n = 0, p = pos, r = row;
-  for(var k=1;k<=64;k++){
-    r++;
-    if(r>=ROWS){ r=0; p++; if(p>=proj.song.length) p = 0; if(p===pos&&r===row) break; }
-    n = k;
-    var c = cellAt(ch,p,r);
-    if(c && c.n) return { rows:k, glide:(c.f==="G"), off:(c.n==="OFF") };
-  }
-  return { rows:16, glide:false, off:false };
+function lastScene(){
+  var last = 0;
+  for(var s=0;s<NSCENE;s++) if(!sceneEmpty(s)) last = s;
+  return last;
 }
 
-function chanActive(c){
-  var anySolo = false;
-  for(var i=0;i<NCH;i++) if(proj.chan[i].solo) anySolo = true;
-  return anySolo ? proj.chan[c].solo : !proj.chan[c].mute;
+/* ------------------------------------------------------------- SOUNDS */
+var INST = {};
+function buildInst(){
+  INST.brk   = { t:"brk",   n:"BREAK", p:instDefaults("brk") };
+  INST.bass  = { t:"sub",   n:"BASS",  p:instDefaults("sub") };
+  INST.stab  = { t:"chord", n:"STAB",  p:instDefaults("chord") };
+  INST.kit   = { t:"kit",   n:"KIT",   p:instDefaults("kit") };
+  INST.siren = { t:"siren", n:"SIREN", p:instDefaults("siren") };
+  INST.hoov  = { t:"hoov",  n:"HOOV",  p:instDefaults("hoov") };
+  INST.bass.p.DROP = 5; INST.bass.p.GLIDE = 0.05; INST.bass.p.SAT = 0.3;
+  INST.stab.p.DEC = 0.30; INST.stab.p.CUT = 3200;
+  INST.hoov.p.DEC = 1.1;
 }
 
-/* schedule one row of the song into the engine */
-function scheduleRow(eng, pos, row, when, met){
-  for(var ch=0; ch<NCH; ch++){
-    if(!chanActive(ch)) continue;
-    var cell = cellAt(ch,pos,row);
-    if(!cell||!cell.n) continue;
-    var cd = proj.chan[ch];
-    var inst = proj.inst[cell.i!=null?cell.i:cd.inst] || proj.inst[0];
-    var t = when + rowTime(row);
-    if(cell.n==="OFF"){ eng.release(ch, t); continue; }
-    var fx = fxOf(cell);
-    var la = lookahead(ch,pos,row);
-    var dur = la.rows*rowDur();
-    var vel = (fx.V!=null? fx.V : 1);
-    var o = { ch:ch, inst:inst, when:t, dur:dur, vel:vel, fx:fx, sustain:la.glide, out:null };
-    if(cell.n.charAt(0)==="S"){
-      o.slice = parseInt(cell.n.substr(1),10)||1;
-      if(inst.t==="brk"){ o.brk = libFind(cd.brk); o.buf = o.brk.kind==="smp"? sampleBuf(eng, o.brk.sid) : null; }
+function stepDur(){ return 60/proj.bpm/4; }
+function swingOf(i){ return (i&1)? stepDur()*(proj.swing/100)*0.5 : 0; }
+
+function laneMuted(l){
+  var solo = -1;
+  for(var i=0;i<NLANE;i++) if(proj.lane[i].solo) solo = i;
+  if(solo>=0) return l!==solo;
+  return !!proj.lane[l].mute;
+}
+/* steps until the next hit on this lane, wrapping inside the scene */
+function gapTo(sc,l,i){
+  for(var k=1;k<=STEPS;k++) if(proj.scenes[sc][l][(i+k)%STEPS]) return k;
+  return STEPS;
+}
+
+/* the only place a step turns into sound */
+function scheduleStep(eng, sc, i, when, met){
+  for(var l=0;l<NLANE;l++){
+    if(laneMuted(l)) continue;
+    var st = proj.scenes[sc][l][i];
+    if(!st) continue;
+    var t = when + swingOf(i);
+    var gap = gapTo(sc,l,i), dur = gap*stepDur();
+    var o = { ch:l, when:t, dur:dur, vel:1, fx:{} };
+    if(st.r) o.fx.B = 1;
+    if(l===0){
+      var brk = libFind(proj.brk);
+      o.inst = INST.brk; o.brk = brk; o.slice = st.v;
+      o.buf = brk.kind==="smp"? sampleBuf(eng, brk.sid) : null;
+    } else if(l===1){
+      var prev = proj.scenes[sc][1][(i+STEPS-1)%STEPS];
+      o.inst = INST.bass;
+      o.midi = 36 + proj.key + SCALE[st.v % SCALE.length];
+      if(prev) o.fx.G = 0.05;
+      o.sustain = (gap===1 && proj.scenes[sc][1][(i+1)%STEPS]);
+      o.dur = Math.min(dur, stepDur()*8);
+    } else if(l===2){
+      o.inst = INST.stab;
+      o.midi = 48 + proj.key + STABROOT[st.v % STABROOT.length];
+      o.inst.p.TYPE = STABTYPE[st.v % STABTYPE.length];
+      o.dur = Math.min(dur, 0.6);
     } else {
-      o.midi = noteToMidi(cell.n);
-      if(o.midi<0) continue;
-      if(inst.t==="smp") o.buf = sampleBuf(eng, libFind(cd.brk).sid);
-      if(inst.t==="brk"){ o.brk = libFind(cd.brk); o.slice = 1; o.buf = o.brk.kind==="smp"? sampleBuf(eng,o.brk.sid):null; }
+      var f = FXPAD[st.v % FXPAD.length];
+      if(f.t==="kit"){ o.inst = INST.kit; o.slice = KITLIST.indexOf(f.d)+1; }
+      else if(f.t==="rev"){
+        var b2 = libFind(proj.brk);
+        o.inst = INST.brk; o.brk = b2; o.slice = 1; o.fx.B = 1;
+        o.buf = b2.kind==="smp"? sampleBuf(eng, b2.sid) : null;
+        o.dur = Math.min(dur, stepDur()*4);
+      }
+      else if(f.t==="siren"){ o.inst = INST.siren; o.midi = 60+proj.key; o.dur = Math.min(dur, 1.6); }
+      else { o.inst = INST.hoov; o.midi = 48+proj.key; o.dur = Math.min(dur, 1.2); }
     }
     eng.trigger(o);
-    if(fx.R){
-      var tick = rowDur()/TPR, k = fx.R, guard = 0;
-      for(var tt = k*tick; tt < dur && guard<32; tt += k*tick, guard++){
-        var o2 = {}; for(var q in o) o2[q]=o[q];
-        o2.when = t+tt; o2.dur = Math.min(dur-tt, rowDur()); o2.sustain=false;
-        o2.vel = vel*(1 - 0.04*guard);
+    if(st.o){                                   /* roll: three inside the step */
+      var sub = stepDur()/3;
+      for(var k=1;k<3;k++){
+        var o2 = {}; for(var q in o) o2[q] = o[q];
+        o2.when = t + k*sub; o2.dur = sub; o2.sustain = false; o2.vel = 1-0.15*k;
         eng.trigger(o2);
       }
     }
   }
-  if(met && row%4===0){
-    kitVoice(eng, row===0?"CLICK":"STICK", when, eng.master, row===0?0.5:0.28, row===0?12:0);
-  }
+  if(met && i%4===0) kitVoice(eng, i===0?"CLICK":"STICK", when, eng.master, i===0?0.5:0.25, i===0?12:0);
 }
 
 /* ---------------------------------------------------------- TRANSPORT */
@@ -1004,63 +1012,112 @@ var schedTimer = null;
 function transportStart(){
   if(play.on) return;
   audioUnlock();
-  play.on = true;
-  play.sched = [];
+  play.on = true; play.sched = []; play.step = 0;
   play.next = ac.currentTime + 0.06;
   if(!schedTimer) schedTimer = setInterval(tickScheduler, 25);
   mark();
 }
 function transportStop(){
-  play.on = false;
-  play.sched = [];
+  play.on = false; play.sched = []; play.queue = -1;
   if(E) E.panic();
   mark();
 }
-function transportToggle(){ play.on ? transportStop() : transportStart(); }
-
 function tickScheduler(){
   if(!play.on||!ac) return;
-  var ahead = ac.currentTime + 0.14;
-  var guard = 0;
+  var ahead = ac.currentTime + 0.14, guard = 0;
   while(play.next < ahead && guard++ < 64){
-    if(proj.song.length===0) break;
-    if(play.pos>=proj.song.length) play.pos = 0;
-    scheduleRow(E, play.pos, play.row, play.next, metOn);
-    play.sched.push({t:play.next, pos:play.pos, row:play.row});
-    play.next += rowDur();
-    play.row++;
-    if(play.row>=ROWS){ play.row = 0; play.pos++; if(play.pos>=proj.song.length) play.pos = 0; }
+    scheduleStep(E, play.scene, play.step, play.next, metOn);
+    play.sched.push({t:play.next, scene:play.scene, step:play.step});
+    play.next += stepDur();
+    play.step++;
+    if(play.step>=STEPS){
+      play.step = 0;
+      if(play.queue>=0){ play.scene = play.queue; play.queue = -1; }
+      else if(proj.chain){
+        var n = play.scene, last = lastScene(), guard2 = 0;
+        do { n = (n+1)%(last+1); } while(sceneEmpty(n) && guard2++ < NSCENE);
+        play.scene = n;
+      }
+    }
   }
-  while(play.sched.length>128) play.sched.shift();
+  while(play.sched.length>96) play.sched.shift();
 }
-/* what the ear hears right now */
 function playhead(){
   if(!play.on) return null;
   var t = ac.currentTime, best = null;
   for(var i=0;i<play.sched.length;i++) if(play.sched[i].t<=t) best = play.sched[i];
   return best;
 }
+function gotoScene(s){
+  if(!play.on){ play.scene = s; play.queue = -1; }
+  else play.queue = (s===play.scene)? -1 : s;
+  mark();
+}
 
-/* audition one cell immediately */
-function audition(ch, cell){
-  if(!cell||!cell.n||cell.n==="OFF") return;
+/* play one palette value now */
+function hitPad(l, v){
   audioUnlock();
-  var cd = proj.chan[ch];
-  var inst = proj.inst[cell.i!=null?cell.i:cd.inst]||proj.inst[0];
-  var fx = fxOf(cell);
-  var o = { ch:ch, inst:inst, when:ac.currentTime+0.005, dur:rowDur()*4, vel:(fx.V!=null?fx.V:1), fx:fx };
-  if(cell.n.charAt(0)==="S"){
-    o.slice = parseInt(cell.n.substr(1),10)||1;
-    if(inst.t==="brk"){ o.brk = libFind(cd.brk); o.buf = o.brk.kind==="smp"? sampleBuf(E,o.brk.sid):null; }
+  if(!E) return;
+  var o = { ch:l, when:ac.currentTime+0.005, dur:stepDur()*4, vel:1, fx:{} };
+  if(l===0){
+    var brk = libFind(proj.brk);
+    o.inst = INST.brk; o.brk = brk; o.slice = v;
+    o.buf = brk.kind==="smp"? sampleBuf(E, brk.sid) : null;
+  } else if(l===1){
+    o.inst = INST.bass; o.midi = 36+proj.key+SCALE[v%SCALE.length]; o.dur = stepDur()*4;
+  } else if(l===2){
+    o.inst = INST.stab; o.midi = 48+proj.key+STABROOT[v%STABROOT.length];
+    o.inst.p.TYPE = STABTYPE[v%STABTYPE.length]; o.dur = 0.5;
   } else {
-    o.midi = noteToMidi(cell.n);
-    if(inst.t==="smp") o.buf = sampleBuf(E, libFind(cd.brk).sid);
-    if(inst.t==="brk"){ o.brk=libFind(cd.brk); o.slice=1; o.buf = o.brk.kind==="smp"? sampleBuf(E,o.brk.sid):null; }
+    var f = FXPAD[v%FXPAD.length];
+    if(f.t==="kit"){ o.inst = INST.kit; o.slice = KITLIST.indexOf(f.d)+1; }
+    else if(f.t==="rev"){
+      var b2 = libFind(proj.brk);
+      o.inst = INST.brk; o.brk = b2; o.slice = 1; o.fx.B = 1;
+      o.buf = b2.kind==="smp"? sampleBuf(E,b2.sid) : null;
+    }
+    else if(f.t==="siren"){ o.inst = INST.siren; o.midi = 60+proj.key; o.dur = 1.2; }
+    else { o.inst = INST.hoov; o.midi = 48+proj.key; o.dur = 1.0; }
   }
   E.trigger(o);
 }
-function auditionSlice(ch, n){
-  audition(ch, {n:"S"+pad(n,2), i:proj.chan[ch].inst, f:"", v:0});
+function applyMix(){
+  if(!E) return;
+  E.master.gain.value = (proj.master==null?0.85:proj.master);
+  E.setDelayTime(60/proj.bpm*0.75);
+  for(var l=0;l<NLANE;l++){
+    var d = proj.lane[l];
+    E.setMix(l, { vol:d.vol, cut:d.tone, res:0.1, crush:(l===0? 0.3:0),
+                  dly:d.fx*0.9, rev:d.fx*0.7, mute:laneMuted(l) });
+  }
+}
+
+/* ------------------------------------------------------------- FILL
+   Put the break on the grid. A one bar break fills one scene; a two bar
+   break fills A and B, so the loop plays back the way it was recorded. */
+function fillBreak(){
+  var brk = libFind(proj.brk);
+  var bars = Math.max(1, Math.min(NSCENE, Math.round(brk.bars||1)));
+  for(var s=0;s<bars;s++) proj.scenes[s][0] = emptyLane();
+  if(brk.kind==="preset"){
+    var g = brk.groove||groove(seq16());
+    for(var i=0;i<STEPS*Math.min(2,bars);i++){
+      var sc = Math.floor(i/STEPS);
+      proj.scenes[sc][0][i%STEPS] = { v:g[i%g.length], r:0, o:0 };
+    }
+    if(bars<2) bars = 1;
+  } else {
+    var span = Math.max(0.001, brk.end-brk.start), slots = bars*STEPS;
+    for(var i=0;i<brk.slices.length;i++){
+      var pos = Math.round((brk.slices[i].t-brk.start)/span*slots);
+      if(pos<0) pos = 0;
+      if(pos>=slots) continue;
+      proj.scenes[Math.floor(pos/STEPS)][0][pos%STEPS] = { v:i+1, r:0, o:0 };
+    }
+  }
+  if(bars>1) proj.chain = true;
+  touch(); mark();
+  return bars;
 }
 /* --------------------------------------------------------------- SAMPLES */
 var SAMPLES = {};        /* id -> {id,name,sr,data(Float32 mono),dur,b:{}} */
@@ -1260,7 +1317,17 @@ fileEl.addEventListener("change", function(){
   if(!fs||!fs.length) return;
   toast("READING");
   decodeFiles(fs, function(l){
-    if(l.length){ proj.chan[chanSel].brk = l[0].id; libSel = LIB.indexOf(l[0]); }
+    if(l.length){
+      proj.brk = l[0].id;
+      libSel = LIB.indexOf(l[0]);
+      chopSel = 0; wavePeaksFor = null;
+      /* a fresh grid gets the break laid out on it straight away */
+      var free = true;
+      for(var s=0;s<NSCENE;s++) if(!laneEmpty(s,0)) free = false;
+      if(free) fillBreak();
+      scrn = 1;
+      touch();
+    }
     fileEl.value = "";
     mark();
   });
@@ -1376,13 +1443,13 @@ function unpcm16(i16){
   return o;
 }
 function dbPutBreak(brk){
-  if(brk.kind!=="smp") return;
+  if(brk.kind!=="smp"||brk.baked) return;
   var r = SAMPLES[brk.sid];
   if(!r) return;
   dbPut("library", {
     id:brk.id, name:brk.name, sid:brk.sid, sname:r.name, sr:r.sr,
     pcm:pcm16(r.data).buffer, start:brk.start, end:brk.end, n:brk.n,
-    slices:brk.slices, bpm:brk.bpm, bars:brk.bars, groove:brk.groove
+    slices:brk.slices, bpm:brk.bpm, bars:brk.bars
   });
 }
 function dbLoadLib(cb){
@@ -1393,7 +1460,7 @@ function dbLoadLib(cb){
       SAMPLES[r.sid] = { id:r.sid, name:r.sname, sr:r.sr, data:unpcm16(new Int16Array(r.pcm)), b:{} };
       SAMPLES[r.sid].dur = SAMPLES[r.sid].data.length/r.sr;
       LIB.push({ id:r.id, name:r.name, kind:"smp", sid:r.sid, start:r.start, end:r.end,
-                 n:r.n, slices:r.slices, bpm:r.bpm, bars:r.bars, groove:r.groove||groove(seq16()) });
+                 n:r.n, slices:r.slices, bpm:r.bpm, bars:r.bars, groove:groove(seq16()) });
     }
     cb&&cb();
   });
@@ -1401,15 +1468,12 @@ function dbLoadLib(cb){
 
 /* ------------------------------------------------------- SERIALISATION */
 function serialize(embed){
-  var o = { name:proj.name, bpm:proj.bpm, swing:proj.swing, master:proj.master, ver:1,
-            inst:proj.inst, chan:proj.chan, song:proj.song, pat:[], breaks:[] };
-  for(var i=0;i<256;i++) if(proj.pat[i]) o.pat.push({id:i, ch:proj.pat[i].ch, rows:proj.pat[i].rows});
-  var used = {};
-  for(var c=0;c<NCH;c++) used[proj.chan[c].brk] = 1;
-  if(proj.chan.smp) used[proj.chan.smp] = 1;
+  var o = { name:proj.name, bpm:proj.bpm, swing:proj.swing, master:proj.master,
+            key:proj.key, brk:proj.brk, chain:proj.chain, ver:2,
+            lane:proj.lane, scenes:proj.scenes, breaks:[] };
   for(var k=0;k<LIB.length;k++){
     var b = LIB[k];
-    if(b.kind!=="smp"||!used[b.id]) continue;
+    if(b.kind!=="smp"||b.id!==proj.brk) continue;
     var e = { id:b.id, name:b.name, kind:"smp", start:b.start, end:b.end, n:b.n,
               slices:b.slices, bpm:b.bpm, bars:b.bars, sid:b.sid };
     if(embed){
@@ -1420,37 +1484,38 @@ function serialize(embed){
   }
   return o;
 }
+function libHas(id){ for(var i=0;i<LIB.length;i++) if(LIB[i].id===id) return true; return false; }
+
 function loadProjectJSON(o){
-  if(!o||!o.chan) { toast("BAD FILE"); return; }
+  if(!o||!o.scenes||!o.lane){ toast("BAD FILE"); return; }
   var p = newProject(o.name||"UNTITLED");
-  p.bpm = o.bpm||170; p.swing = o.swing||0; p.master = (o.master==null?0.85:o.master);
-  if(o.inst&&o.inst.length) p.inst = o.inst;
-  p.chan = o.chan; p.song = o.song||[];
-  for(var i=0;i<(o.pat||[]).length;i++){
-    var q = o.pat[i];
-    p.pat[q.id] = { ch:q.ch, rows:q.rows };
-  }
+  p.bpm = o.bpm||170; p.swing = o.swing||0;
+  p.master = (o.master==null?0.85:o.master);
+  p.key = o.key||0; p.chain = !!o.chain;
+  p.lane = o.lane; p.scenes = o.scenes;
+  for(var s=p.scenes.length;s<NSCENE;s++) p.scenes.push(emptyScene());
   for(var k=0;k<(o.breaks||[]).length;k++){
     var b = o.breaks[k];
     if(libHas(b.id)) continue;
     var sid = b.sid;
     if(b.wav){
       var w = wavToFloat(unb64(b.wav));
-      if(w){ sid = addSample(b.name, w.sr, w.data); }
+      if(w) sid = addSample(b.name, w.sr, w.data);
     }
     var nb = { id:b.id, name:b.name, kind:"smp", sid:sid, start:b.start, end:b.end,
                n:b.n, slices:b.slices, bpm:b.bpm, bars:b.bars, groove:groove(seq16()) };
     LIB.push(nb); dbPutBreak(nb);
   }
+  p.brk = libHas(o.brk)? o.brk : "p0";
   proj = p;
   applyMix();
-  editPat = [0,0,0,0,0,0];
-  for(var c=0;c<NCH;c++) if(proj.song.length) editPat[c] = Math.max(0,proj.song[0][c]);
+  libSel = 0;
+  for(var i=0;i<LIB.length;i++) if(LIB[i].id===proj.brk) libSel = i;
   toast("LOADED"); mark();
 }
-function libHas(id){ for(var i=0;i<LIB.length;i++) if(LIB[i].id===id) return true; return false; }
 
 var lastSave = 0, unsaved = false;
+function touch(){ unsaved = true; }
 function saveProject(quiet){
   var o = serialize(false);
   dbPut("projects", o, function(){
@@ -1461,31 +1526,35 @@ function saveProject(quiet){
   });
 }
 function exportJSON(){
-  var o = serialize(true);
-  download((proj.name||"UNTITLED")+".json", new Blob([JSON.stringify(o)],{type:"application/json"}));
+  download((proj.name||"UNTITLED")+".json",
+           new Blob([JSON.stringify(serialize(true))],{type:"application/json"}));
   toast("EXPORTED");
 }
 
 /* ---------------------------------------------------------- WAV RENDER */
 var rendering = false;
 function renderWAV(){
-  if(rendering||!proj.song.length) return;
-  rendering = true; toast("RENDERING");
-  mark();
+  if(rendering) return;
+  rendering = true; toast("RENDERING"); mark();
   var sr = 44100;
-  var total = proj.song.length*ROWS*rowDur()+2.5;
+  var bars = lastScene()+1, reps = Math.max(2, Math.min(8, Math.ceil(8/bars)));
+  var total = reps*bars*STEPS*stepDur()+2.5;
   var OAC = window.OfflineAudioContext||window.webkitOfflineAudioContext;
   var oac;
   try{ oac = new OAC(2, Math.ceil(total*sr), sr); }
-  catch(e){ rendering=false; toast("NO ROOM"); return; }
+  catch(e){ rendering=false; toast("NO ROOM"); mark(); return; }
   var eng = createEngine(oac);
-  for(var c=0;c<NCH;c++) eng.setMix(c, proj.chan[c]);
+  for(var l=0;l<NLANE;l++){
+    var d = proj.lane[l];
+    eng.setMix(l, { vol:d.vol, cut:d.tone, res:0.1, crush:(l===0?0.3:0),
+                    dly:d.fx*0.9, rev:d.fx*0.7, mute:laneMuted(l) });
+  }
+  eng.master.gain.value = proj.master;
   eng.setDelayTime(60/proj.bpm*0.75);
   var t = 0.05;
-  for(var pos=0;pos<proj.song.length;pos++){
-    for(var r=0;r<ROWS;r++){
-      scheduleRow(eng, pos, r, t, false);
-      t += rowDur();
+  for(var r=0;r<reps;r++){
+    for(var s=0;s<bars;s++){
+      for(var i=0;i<STEPS;i++){ scheduleStep(eng, s, i, t, false); t += stepDur(); }
     }
   }
   function done(buf){
@@ -1499,47 +1568,35 @@ function renderWAV(){
   else oac.oncomplete = function(e){ done(e.renderedBuffer); };
 }
 
-/* -------------------------------------------------------- EXPORT SLICES */
+/* the break as one WAV plus a JSON slice map */
 function exportKit(){
-  var brk = libFind(proj.chan[chanSel].brk);
+  var brk = libFind(proj.brk);
   if(brk.kind!=="smp"){ toast("NO SAMPLE"); return; }
   var r = SAMPLES[brk.sid];
   if(!r) return;
-  /* one WAV per slice, concatenated download is not possible without zip,
-     so write a single WAV of the trimmed break plus a JSON slice map */
   var from = Math.floor(brk.start*r.sr), to = Math.floor(brk.end*r.sr);
-  var seg = r.data.subarray(from,to);
-  download(brk.name+".wav", new Blob([encodeWAV([seg], r.sr)],{type:"audio/wav"}));
+  download(brk.name+".wav", new Blob([encodeWAV([r.data.subarray(from,to)], r.sr)],{type:"audio/wav"}));
   var map = { name:brk.name, sampleRate:r.sr, bars:brk.bars, bpm:brk.bpm,
-              slices:brk.slices.map(function(s){ return { start:Math.round((s.t-brk.start)*r.sr), pitch:s.p, reverse:!!s.r, gain:s.g }; }) };
+              slices:brk.slices.map(function(s){
+                return { start:Math.round((s.t-brk.start)*r.sr), pitch:s.p, reverse:!!s.r, gain:s.g }; }) };
   download(brk.name+".json", new Blob([JSON.stringify(map,null,1)],{type:"application/json"}));
   toast("EXPORTED");
 }
 /* ------------------------------------------------------------------ UI */
-var SCR = ["SONG","PTN","PAD","CHOP","INST","MIX"];
-var scrn = 0, DISK = 6;
-var chanSel = 0, rowSel = 0, libSel = 0, instSel = 0, mixSel = 0, chopSel = 0;
-var editPat = [0,0,0,0,0,0];
-var songSel = { pos:0, ch:0 };
-var lastCell = [];
-var drawer = null, recOn = false, sens = 0.5;
+var SCR = ["BEAT","BREAK","SAVE"];
+var scrn = 0;
+var laneSel = 0, libSel = 0, chopSel = 0;
+var padSel = [1,0,0,0];               /* the armed palette value per lane */
+var armRev = false, armRoll = false;
 var toastMsg = "", toastT = -9999;
 var confirmBox = null, keyboard = null;
+var sens = 0.5;
 var TOP = 20, TAB = 26;
 
 function toast(m){ toastMsg = m; toastT = now(); mark(); }
 function contentTop(){ return TOP+1; }
 function contentH(){ return H-TAB-TOP-1; }
-
 function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
-function chanCell(ch){ return lastCell[ch] || (lastCell[ch] = {n:"S01",i:proj.chan[ch].inst,f:"",v:0}); }
-function curPat(ch){
-  var id = editPat[ch];
-  if(id<0||id>255) id = 0;
-  if(!proj.pat[id]){ proj.pat[id] = {ch:ch, rows:emptyRows()}; }
-  return id;
-}
-function touch(){ unsaved = true; }
 
 /* ---- shared widgets ------------------------------------------------- */
 function hbar(x,y,w,h,v,lab,val,set){
@@ -1548,58 +1605,51 @@ function hbar(x,y,w,h,v,lab,val,set){
   rect(x+1,y+1,fw,h-2,ORANGE);
   if(lab) text(x+3,y+((h-7)>>1),lab,fw>tw(lab)+2?BLACK:WHITE);
   if(val!=null) textR(x+w-3,y+((h-7)>>1),val, fw>w-tw(val)-4?BLACK:WHITE);
-  hit(x,y,w,h,{
-    down:function(lx){ set(clamp(lx/(w-1),0,1)); },
-    drag:function(lx){ set(clamp(lx/(w-1),0,1)); }
-  });
-}
-function vfader(x,y,w,h,v,set){
-  panel(x,y,w,h,BLUE,true);
-  var fh = Math.round((h-2)*clamp(v,0,1));
-  rect(x+1,y+h-1-fh,w-2,fh,ORANGE);
-  hit(x,y,w,h,{
-    down:function(lx,ly){ set(clamp(1-ly/(h-1),0,1)); },
-    drag:function(lx,ly){ set(clamp(1-ly/(h-1),0,1)); }
-  });
+  hit(x,y,w,h,{ down:function(lx){ set(clamp(lx/(w-1),0,1)); },
+                drag:function(lx){ set(clamp(lx/(w-1),0,1)); } });
 }
 function stepper(x,y,w,h,label,dec,inc,onlab){
-  tinyButton(x,y,h,h,I_LT,dec);
-  panel(x+h,y,w-h*2,h,BLUE,true);
-  textC(x+h,y+((h-7)>>1),w-h*2,label,WHITE);
-  if(onlab) hit(x+h,y,w-h*2,h,{tap:onlab});
-  tinyButton(x+w-h,y,h,h,I_RT,inc);
+  var bw = Math.max(12, Math.min(h+4, 18));
+  tinyButton(x,y,bw,h,I_LT,dec);
+  panel(x+bw,y,w-bw*2,h,BLUE,true);
+  textC(x+bw,y+((h-7)>>1),w-bw*2,label,WHITE);
+  if(onlab) hit(x+bw,y,w-bw*2,h,{tap:onlab});
+  tinyButton(x+w-bw,y,bw,h,I_RT,inc);
 }
 
 /* ---- transport ------------------------------------------------------ */
 function drawTransport(){
   rect(0,0,W,TOP,BLUE);
   rect(0,TOP-1,W,1,BLACK);
-  var bw = 24, y = 1, bh = TOP-3;
-  button(1,y,bw,bh, I_PLAY, function(){ if(!play.on) transportStart(); }, play.on);
-  button(1+bw+1,y,bw,bh, I_STOP, function(){ transportStop(); });
-  button(1+(bw+1)*2,y,bw,bh, I_REC, function(){ recOn=!recOn; if(recOn&&!play.on) transportStart(); }, recOn);
-  var x = 1+(bw+1)*3+2;
-  /* bpm: drag up and down */
-  panel(x,y,30,bh,BLUE,true);
-  text(x+3,y+((bh-7)>>1), pad(Math.round(proj.bpm),3), WHITE);
-  hit(x,y,30,bh,{
-    drag:function(lx,ly,dx,dy){ proj.bpm = clamp(proj.bpm - dy*0.5, 120, 200); touch(); if(E) E.setDelayTime(60/proj.bpm*0.75); },
+  var y = 1, bh = TOP-3;
+  button(1,y,26,bh, I_PLAY, function(){ play.on? transportStop() : transportStart(); }, play.on);
+  button(29,y,26,bh, I_STOP, function(){ transportStop(); });
+  panel(58,y,30,bh,BLUE,true);
+  text(60,y+((bh-7)>>1), pad(Math.round(proj.bpm),3), WHITE);
+  hit(58,y,30,bh,{
+    drag:function(lx,ly,dx,dy){ proj.bpm = clamp(proj.bpm - dy*0.4, 120, 200); touch(); applyMix(); },
     tap:function(){ toast("DRAG BPM"); }
   });
-  x += 32;
+  var x0 = 90, bw = Math.floor((W-x0-1)/5);
   var ph = playhead();
-  var pos = ph? ph.pos : play.pos, rw = ph? ph.row : play.row;
-  panel(x,y,34,bh,BLUE,true);
-  text(x+2,y+((bh-7)>>1), hx(pos,2)+":"+hx(rw,2), play.on?ORANGE:WHITE);
-  x += 36;
-  if(unsaved) text(x+2,y+((bh-7)>>1), I_DOT, ORANGE);
-  button(W-19,y,18,bh, I_DISK, function(){ scrn = DISK; mark(); }, scrn===DISK);
+  var live = ph? ph.scene : play.scene;
+  for(var s=0;s<NSCENE;s++){
+    (function(s,x){
+      var on = (live===s), q = (play.queue===s);
+      var lit = on||q;
+      panel(x,y,bw-1,bh, lit?(q?ORANGE:WHITE):BLUE, lit);
+      textC(x,y+((bh-7)>>1),bw-1, SCENEID[s], lit?BLUE:(sceneEmpty(s)?BLACK:WHITE));
+      hit(x,y,bw,bh,{ tap:function(){ gotoScene(s); } });
+    })(s, x0+s*bw);
+  }
+  button(x0+4*bw, y, W-(x0+4*bw)-1, bh, "CHN",
+    function(){ proj.chain = !proj.chain; touch(); mark(); }, proj.chain);
 }
 function drawTabs(){
-  var y = H-TAB, w = Math.floor(W/6);
+  var y = H-TAB, w = Math.floor(W/3);
   rect(0,y,W,TAB,BLUE);
-  for(var i=0;i<6;i++){
-    var x = i*w, ww = (i===5? W-x : w);
+  for(var i=0;i<3;i++){
+    var x = i*w, ww = (i===2? W-x : w);
     var on = (scrn===i);
     panel(x,y+1,ww,TAB-1,on?WHITE:BLUE,on);
     textC(x,y+((TAB-7)>>1),ww,SCR[i],on?BLUE:WHITE);
@@ -1607,8 +1657,7 @@ function drawTabs(){
   }
 }
 function drawToast(){
-  var dt = now()-toastT;
-  if(dt>1600||!toastMsg) return;
+  if(now()-toastT>1600||!toastMsg) return;
   var w = tw(toastMsg)+10, x = (W-w)>>1, y = TOP+3;
   panel(x,y,w,13,ORANGE,false);
   textC(x,y+3,w,toastMsg,BLACK);
@@ -1619,24 +1668,24 @@ function askConfirm(msg, onYes){ confirmBox = {m:msg, y:onYes}; mark(); }
 function drawConfirm(){
   if(!confirmBox) return;
   hit(0,0,W,H,{tap:function(){}, hold:function(){}});
-  var w = Math.max(100, tw(confirmBox.m)+16), h = 44, x = (W-w)>>1, y = (H-h)>>1;
+  var w = Math.max(100, tw(confirmBox.m)+16), h = 46, x = (W-w)>>1, y = (H-h)>>1;
   rect(x-2,y-2,w+4,h+4,BLACK);
   panel(x,y,w,h,BLUE,false);
   textC(x,y+7,w,confirmBox.m,WHITE);
-  button(x+6,y+22,(w>>1)-10,16,"Y",function(){ var f=confirmBox.y; confirmBox=null; f&&f(); mark(); });
-  button(x+(w>>1)+4,y+22,(w>>1)-10,16,"N",function(){ confirmBox=null; mark(); });
+  button(x+6,y+22,(w>>1)-10,18,"Y",function(){ var f=confirmBox.y; confirmBox=null; f&&f(); mark(); });
+  button(x+(w>>1)+4,y+22,(w>>1)-10,18,"N",function(){ confirmBox=null; mark(); });
 }
 var KEYS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
 function openKeyboard(val, done){ keyboard = {v:(val||"").toUpperCase(), done:done}; mark(); }
 function drawKeyboard(){
   if(!keyboard) return;
   hit(0,0,W,H,{tap:function(){}, hold:function(){}});
-  var h = 92, y = H-TAB-h, x = 0, w = W;
-  rect(x,y-1,w,h+1,BLACK);
-  panel(x,y,w,h,BLUE,false);
+  var h = 96, y = H-TAB-h, w = W;
+  rect(0,y-1,w,h+1,BLACK);
+  panel(0,y,w,h,BLUE,false);
   panel(4,y+3,w-8,12,BLUE,true);
   text(7,y+5,keyboard.v+"_",ORANGE);
-  var cols = 10, bw = Math.floor((w-8)/cols), bh = 13;
+  var cols = 10, bw = Math.floor((w-8)/cols), bh = 14;
   for(var i=0;i<KEYS.length;i++){
     var cx = 4+(i%cols)*bw, cy = y+18+Math.floor(i/cols)*bh;
     (function(ch,cx,cy){
@@ -1644,300 +1693,139 @@ function drawKeyboard(){
     })(KEYS.charAt(i),cx,cy);
   }
   var by = y+18+4*bh;
-  button(4,by,40,13,"DEL",function(){ keyboard.v = keyboard.v.slice(0,-1); mark(); });
-  button(48,by,40,13,"OK",function(){ var k=keyboard; keyboard=null; k.done(k.v||"UNTITLED"); mark(); });
-  button(92,by,40,13,"X",function(){ keyboard=null; mark(); });
+  button(4,by,44,14,"DEL",function(){ keyboard.v = keyboard.v.slice(0,-1); mark(); });
+  button(52,by,44,14,"OK",function(){ var k=keyboard; keyboard=null; k.done(k.v||"UNTITLED"); mark(); });
+  button(100,by,44,14,"X",function(){ keyboard=null; mark(); });
 }
-/* -------------------------------------------------------------- SONG */
-var songScroll = 0;
-function chanShort(i){ return ["BR1","BR2","SUB","REE","STB","FX"][i]; }
+/* ---------------------------------------------------------------- BEAT */
+function paletteInfo(l){
+  var labs = [], subs = [], base = 0, cols = 4;
+  if(l===0){
+    var brk = libFind(proj.brk);
+    var n = Math.max(1, Math.min(16, brk.n||16));
+    for(var i=0;i<n;i++){
+      labs.push(pad(i+1,2));
+      subs.push(brk.kind==="preset" ? ((brk.map[i]&&brk.map[i].length)? brk.map[i][0][0] : "-") : "");
+    }
+    base = 1; cols = 4;
+  } else if(l===1){
+    for(var i=0;i<SCALE.length;i++){
+      labs.push(KEYNAME[(proj.key+SCALE[i])%12] + (SCALE[i]>=12?"'":""));
+      subs.push("");
+    }
+    cols = 4;
+  } else if(l===2){
+    for(var i=0;i<STABROOT.length;i++){
+      labs.push(KEYNAME[(proj.key+STABROOT[i])%12]);
+      subs.push(STABTYPE[i]===2? "MAJ":"MIN");
+    }
+    cols = 3;
+  } else {
+    for(var i=0;i<FXPAD.length;i++){ labs.push(FXPAD[i].n); subs.push(""); }
+    cols = 4;
+  }
+  return { n:labs.length, cols:cols, labs:labs, subs:subs, base:base };
+}
+var STEPCHR = "123456789ABCDEFG";
+function stepLabel(l,v){ return STEPCHR.charAt(clamp(l===0? v-1 : v, 0, 15)); }
 
-function drawSong(){
+function drawBeat(){
   var y0 = contentTop(), h = contentH();
-  var lw = 14, cw = Math.floor((W-lw)/NCH), rh = 12;
-  var stripH = 18, gridH = h-11-stripH;
-  var vis = Math.floor(gridH/rh);
-
   rect(0,y0,W,h,BLUE);
-  /* header */
-  for(var c=0;c<NCH;c++){
-    var x = lw+c*cw, ww = (c===NCH-1? W-x : cw);
-    var cd = proj.chan[c];
-    var st = cd.solo? ORANGE : (cd.mute? BLACK : BLUE);
-    panel(x,y0,ww-1,10, st, false);
-    textC(x,y0+2,ww-1,chanShort(c), cd.solo?BLACK:WHITE);
-    (function(c){
-      hit(x,y0,ww,10,{ tap:function(){ proj.chan[c].mute = !proj.chan[c].mute; chanSel=c; touch(); mark(); },
-                       hold:function(){ proj.chan[c].solo = !proj.chan[c].solo; touch(); mark(); } });
-    })(c);
-  }
-  var ph = playhead();
-  var ppos = ph? ph.pos : -1;
-  if(songSel.pos < songScroll) songScroll = songSel.pos;
-  if(songSel.pos >= songScroll+vis) songScroll = songSel.pos-vis+1;
-  if(play.on && ppos>=0){
-    if(ppos<songScroll) songScroll = ppos;
-    if(ppos>=songScroll+vis) songScroll = ppos-vis+1;
-  }
-  songScroll = clamp(songScroll,0,Math.max(0,proj.song.length-vis));
+  var pal = paletteInfo(laneSel);
+  var prows = Math.ceil(pal.n/pal.cols);
+  var ctlH = 32;
+  var avail = h-ctlH-6;
+  var padH = clamp(Math.floor((avail-NLANE*12)/prows), 12, 56);
+  var rowH = clamp(Math.floor((avail-prows*padH)/NLANE), 12, 64);
+  var twoLine = (padH>=22);
+  var gridH = NLANE*rowH;
+  var palY = y0+gridH+4;
 
-  var gy = y0+11;
-  rect(0,gy,W,gridH,BLUE);
-  for(var i=0;i<vis;i++){
-    var s = songScroll+i;
-    if(s>=proj.song.length) break;
-    var y = gy+i*rh;
-    if(s===ppos){ rect(0,y,W,rh-1,WHITE); }
-    text(1,y+2,hx(s,2), s===ppos?BLUE:ORANGE);
-    for(var c2=0;c2<NCH;c2++){
-      var x2 = lw+c2*cw, id = proj.song[s][c2];
-      var sel = (songSel.pos===s&&songSel.ch===c2);
-      if(sel) panel(x2,y,cw-1,rh-1,s===ppos?WHITE:BLUE,true);
-      var lbl = id<0? "--" : hx(id,2);
-      textC(x2,y+2,cw-1,lbl, s===ppos?BLUE:(id<0?BLACK:WHITE));
-      (function(s,c2){
-        hit(x2,y,cw,rh,{ tap:function(){
-            if(songSel.pos===s&&songSel.ch===c2 && now()-lastSongTap<300){
-              var id2 = proj.song[s][c2];
-              if(id2>=0){ var n = patClone(id2); if(n>=0){ proj.song[s][c2]=n; editPat[c2]=n; toast("CLONED"); } }
-            }
-            lastSongTap = now();
-            songSel.pos = s; songSel.ch = c2; chanSel = c2;
-            var idc = proj.song[s][c2];
-            if(idc>=0) editPat[c2] = idc;
-            touch(); mark();
+  /* ---- the grid ---- */
+  var lw = 34, sw = Math.floor((W-lw-1)/STEPS), gx = lw + ((W-lw-1)-sw*STEPS>>1);
+  var ph = playhead();
+  var sc = ph? ph.scene : play.scene;
+  var live = ph && ph.scene===sc ? ph.step : -1;
+  for(var l=0;l<NLANE;l++){
+    var y = y0+l*rowH;
+    var selL = (laneSel===l), mut = laneMuted(l);
+    panel(0,y,lw-1,rowH-1, selL?WHITE:(mut?BLACK:BLUE), selL);
+    text(2,y+((rowH-7)>>1), LANE[l], selL?BLUE:(mut?ORANGE:WHITE));
+    (function(l){
+      hit(0,y,lw,rowH,{ tap:function(){ laneSel=l; mark(); },
+                        hold:function(){ proj.lane[l].mute = !proj.lane[l].mute; applyMix(); touch(); mark(); } });
+    })(l);
+    for(var i=0;i<STEPS;i++){
+      var x = gx+i*sw, st = proj.scenes[sc][l][i];
+      var beat = (i%4===0);
+      var on = (i===live);
+      if(st){
+        rect(x,y+1,sw-1,rowH-3, on?WHITE:ORANGE);
+        if(selL && sw>=8) textC(x,y+((rowH-7)>>1),sw-1,stepLabel(l,st.v),BLACK);
+        if(st.r) rect(x+1,y+2,sw-3,1,BLACK);
+        if(st.o) rect(x+1,y+rowH-4,sw-3,1,BLACK);
+      } else {
+        panel(x,y+1,sw-1,rowH-3, on?WHITE:BLUE, true);
+        if(beat && !on) rect(x+((sw-1)>>1),y+3,1,2,WHITE);
+      }
+      if(beat && i) rect(x-1,y+1,1,rowH-3,BLACK);   /* chunk into fours */
+      (function(l,i){
+        hit(x,y,sw,rowH,{
+          tap:function(){
+            var s = proj.scenes[sc][l][i], v = padSel[l];
+            if(s && s.v===v && !!s.r===!!armRev && !!s.o===!!armRoll) setStep(sc,l,i,null);
+            else { setStep(sc,l,i,v,armRev,armRoll); if(!play.on) hitPad(l,v); }
+            laneSel = l; mark();
           },
-          hold:function(){ songSel.pos=s; songSel.ch=c2; chanSel=c2;
-            var idc = proj.song[s][c2];
-            if(idc>=0){ editPat[c2]=idc; scrn=1; } mark(); }
+          hold:function(){ setStep(sc,l,i,null); laneSel=l; mark(); }
         });
-      })(s,c2);
+      })(l,i);
     }
   }
-  hit(0,gy,lw,gridH,{ drag:function(lx,ly,dx,dy){ songScroll = clamp(songScroll-dy/rh,0,Math.max(0,proj.song.length-vis)); mark(); } });
 
-  /* strip */
-  var sy = y0+h-stripH, bw = Math.floor(W/7);
-  rect(0,sy,W,stripH,BLUE);
-  var cur = proj.song.length? proj.song[songSel.pos][songSel.ch] : -1;
-  tinyButton(0,sy+1,bw-1,stripH-2,I_LT,function(){ setSongCell(cur-1); });
-  panel(bw,sy+1,bw-1,stripH-2,BLUE,true);
-  textC(bw,sy+1+((stripH-9)>>1),bw-1, cur<0?"--":hx(cur,2), WHITE);
-  tinyButton(bw*2,sy+1,bw-1,stripH-2,I_RT,function(){ setSongCell(cur+1); });
-  button(bw*3,sy+1,bw-1,stripH-2,"NEW",function(){
-    var n = patNew(songSel.ch);
-    if(n<0){ toast("NO ROOM"); return; }
-    setSongCell(n); editPat[songSel.ch]=n; scrn=1; mark();
-  });
-  button(bw*4,sy+1,bw-1,stripH-2,"CLR",function(){ setSongCell(-1); });
-  button(bw*5,sy+1,bw-1,stripH-2,"+",function(){
-    var r = songRow();
-    if(proj.song.length) for(var c=0;c<NCH;c++) r[c] = proj.song[songSel.pos][c];
-    proj.song.splice(songSel.pos+1,0,r); songSel.pos++; touch(); mark();
-  });
-  button(bw*6,sy+1,W-bw*6-1,stripH-2,"-",function(){
-    if(proj.song.length<=1){ toast("NO"); return; }
-    proj.song.splice(songSel.pos,1);
-    songSel.pos = clamp(songSel.pos,0,proj.song.length-1); touch(); mark();
-  });
-}
-var lastSongTap = 0;
-function setSongCell(v){
-  if(!proj.song.length) return;
-  v = clamp(v,-1,255);
-  if(v>=0 && !proj.pat[v]) proj.pat[v] = {ch:songSel.ch, rows:emptyRows()};
-  proj.song[songSel.pos][songSel.ch] = v;
-  if(v>=0) editPat[songSel.ch] = v;
-  touch(); mark();
-}
-
-/* ----------------------------------------------------------- PATTERN */
-var patScroll = 0, lastRowTap = 0;
-
-function patCellTap(ch,pid,i){
-  var p = proj.pat[pid];
-  var cell = p.rows[i];
-  if(chanSel!==ch){ chanSel = ch; rowSel = i; audition(ch,cell); mark(); return; }
-  if(!cell){ var lc = chanCell(ch); p.rows[i] = {n:lc.n,i:lc.i,f:lc.f,v:lc.v}; touch(); }
-  else if(rowSel===i && now()-lastRowTap<320){ p.rows[i]=null; touch(); }
-  rowSel = i;
-  audition(ch, p.rows[i]);
-  lastRowTap = now(); mark();
-}
-function rowWindow(gridH){
-  var rh = clamp(Math.floor(gridH/ROWS), 9, 18);
-  var vis = Math.min(ROWS, Math.floor(gridH/rh));
-  var ph = playhead();
-  var focus = rowSel;
-  if(play.on && ph) focus = ph.row;
-  if(focus < patScroll) patScroll = focus;
-  if(focus >= patScroll+vis) patScroll = focus-vis+1;
-  patScroll = clamp(patScroll, 0, ROWS-vis);
-  return {rh:rh, vis:vis, top:patScroll};
-}
-function drawPattern(){
-  if(W>=320){ drawPatternWide(); return; }
-  var y0 = contentTop(), h = contentH();
-  var hh = 12, gy = y0+hh;
-  rect(0,y0,W,h,BLUE);
-  var ch = chanSel, pid = curPat(ch), p = proj.pat[pid];
-  var brk = libFind(proj.chan[ch].brk);
-  var inst = proj.inst[proj.chan[ch].inst];
-
-  stepper(0,y0,52,hh-1,chanShort(ch), function(){ chanSel=(chanSel+NCH-1)%NCH; mark(); },
-                                      function(){ chanSel=(chanSel+1)%NCH; mark(); });
-  stepper(54,y0,44,hh-1,hx(pid,2), function(){ editPat[ch]=clamp(pid-1,0,255); mark(); },
-                                   function(){ editPat[ch]=clamp(pid+1,0,255); mark(); });
-  var nm = (inst.t==="brk")? brk.name : inst.n;
-  button(100,y0,W-100-24,hh-1,nm.substr(0,10), function(){ scrn = (inst.t==="brk")?3:4; mark(); });
-  button(W-23,y0,22,hh-1,"CLR", function(){
-    askConfirm("CLEAR "+hx(pid,2)+"?", function(){ proj.pat[pid].rows = emptyRows(); touch(); mark(); });
-  });
-
-  var win = rowWindow(h-hh);
-  var ph = playhead();
-  var live = (play.on && ph && proj.song.length && proj.song[ph.pos][ch]===pid);
-  for(var k=0;k<win.vis;k++){
-    var i = win.top+k, y = gy+k*win.rh, rh = win.rh;
-    var on = live && ph.row===i;
-    if(on) rect(0,y,W,rh,WHITE);
-    else if(i%4===0) rect(0,y,W,1,BLACK);
-    var fg = on? BLUE : WHITE;
-    var ty = y+((rh-7)>>1);
-    text(2,ty,hx(i,2), on?BLUE:ORANGE);
-    var c = p.rows[i];
-    if(c){
-      text(20,ty, c.n, fg);
-      text(46,ty, hx(c.i,1), on?BLUE:ORANGE);
-      if(c.f) text(58,ty, c.f+hx(c.v,2), fg);
-    } else {
-      text(20,ty, "---", on?BLUE:BLACK);
-    }
-    if(rowSel===i) frame(0,y,W,rh,ORANGE);
-    (function(ch,pid,i){
-      hit(0,y,W,rh,{ tap:function(){ patCellTap(ch,pid,i); },
-                     hold:function(){ rowSel=i; openDrawer(ch,pid,i); } });
-    })(ch,pid,i);
+  /* ---- palette ---- */
+  var pw = Math.floor(W/pal.cols);
+  for(var i=0;i<pal.n;i++){
+    var cx = (i%pal.cols)*pw, cy = palY+Math.floor(i/pal.cols)*padH;
+    var v = i+pal.base;
+    var on = (padSel[laneSel]===v);
+    var hot = padHot[laneSel*100+i] && (now()-padHot[laneSel*100+i] < 130);
+    (function(i,v,cx,cy){
+      var two = twoLine && !!pal.subs[i];
+      panel(cx,cy,pw-1,padH-1, (on||hot)?WHITE:BLUE, on||hot);
+      textC(cx,cy+((padH-7)>>1)-(two?4:0), pw-1, pal.labs[i], (on||hot)?BLUE:WHITE);
+      if(two) textC(cx,cy+((padH-7)>>1)+5, pw-1, pal.subs[i].substr(0,6), (on||hot)?BLUE:ORANGE);
+      hit(cx,cy,pw,padH,{ down:function(){
+        padSel[laneSel] = v; padHot[laneSel*100+i] = now(); hitPad(laneSel, v); mark();
+      }});
+    })(i,v,cx,cy);
   }
-}
-/* landscape / tablet: every channel at once, ProTracker style */
-function drawPatternWide(){
-  var y0 = contentTop(), h = contentH();
-  var hh = 11, gy = y0+hh+9, lw = 14;
-  rect(0,y0,W,h,BLUE);
-  var cw = Math.floor((W-lw)/NCH);
-  for(var c=0;c<NCH;c++){
-    var x = lw+c*cw;
-    var pid = curPat(c), sel = (chanSel===c);
-    panel(x,y0,cw-1,hh-1, sel?WHITE:BLUE, sel);
-    text(x+2,y0+2, chanShort(c), sel?BLUE:WHITE);
-    text(x+cw-16,y0+2, hx(pid,2), sel?BLUE:ORANGE);
-    (function(c){
-      hit(x,y0,cw,hh,{ tap:function(){ chanSel=c; mark(); },
-                       hold:function(){ chanSel=c; scrn=3; mark(); } });
-    })(c);
-    (function(c,pid){
-      tinyButton(x,y0+hh,10,8,I_LT,function(){ editPat[c]=clamp(pid-1,0,255); mark(); });
-      tinyButton(x+11,y0+hh,10,8,I_RT,function(){ editPat[c]=clamp(pid+1,0,255); mark(); });
-      button(x+22,y0+hh,cw-24,8,"CLR",function(){
-        askConfirm("CLEAR "+hx(pid,2)+"?", function(){ proj.pat[pid].rows = emptyRows(); touch(); mark(); });
-      });
-    })(c,pid);
-  }
-  var win = rowWindow(h-hh-9);
-  var ph = playhead();
-  for(var k=0;k<win.vis;k++){
-    var i = win.top+k, y = gy+k*win.rh, rh = win.rh, ty = y+((rh-7)>>1);
-    var on = play.on && ph && ph.row===i;
-    if(on) rect(0,y,W,rh,WHITE);
-    else if(i%4===0) rect(0,y,W,1,BLACK);
-    text(2,ty,hx(i,2), on?BLUE:ORANGE);
-    for(var c2=0;c2<NCH;c2++){
-      var x2 = lw+c2*cw, pid2 = curPat(c2), cc = proj.pat[pid2].rows[i];
-      var live = play.on && ph && proj.song.length && proj.song[ph.pos][c2]===pid2 && ph.row===i;
-      var fg = on? BLUE : WHITE;
-      if(cc){
-        text(x2+1,ty, cc.n, fg);
-        text(x2+21,ty, hx(cc.i,1), on?BLUE:ORANGE);
-        if(cc.f) text(x2+29,ty, cc.f+hx(cc.v,2), fg);
-      } else text(x2+1,ty,"---", on?BLUE:BLACK);
-      if(chanSel===c2 && rowSel===i) frame(x2,y,cw-1,rh,ORANGE);
-      (function(c2,pid2,i){
-        hit(x2,y,cw,rh,{ tap:function(){ patCellTap(c2,pid2,i); },
-                         hold:function(){ chanSel=c2; rowSel=i; openDrawer(c2,pid2,i); } });
-      })(c2,pid2,i);
-    }
-  }
-}
 
-/* -------------------------------------------------------------- PADS */
-function drawPads(){
-  var y0 = contentTop(), h = contentH();
-  rect(0,y0,W,h,BLUE);
-  var ch = chanSel, brk = libFind(proj.chan[ch].brk);
-  var inst = proj.inst[proj.chan[ch].inst];
-  stepper(0,y0,52,11,chanShort(ch), function(){ chanSel=(chanSel+NCH-1)%NCH; mark(); },
-                                    function(){ chanSel=(chanSel+1)%NCH; mark(); });
-  stepper(54,y0,W-54-40,11, (inst.t==="brk"?brk.name:inst.n).substr(0,10),
-    function(){ cycleBreak(ch,-1); }, function(){ cycleBreak(ch,1); },
-    function(){ scrn=3; mark(); });
-  button(W-38,y0,37,11, recOn?"REC "+I_REC:"REC", function(){ recOn=!recOn; if(recOn&&!play.on) transportStart(); mark(); }, recOn);
-
-  var gy = y0+13, gh = h-13;
-  var n = (inst.t==="brk")? Math.min(16,brk.n) : 16;
-  var cols = 4, rows = 4;
-  var pw = Math.floor(W/cols), phh = Math.floor(gh/rows);
-  for(var i=0;i<16;i++){
-    var cx = (i%cols)*pw, cy = gy+Math.floor(i/cols)*phh;
-    var idx = i+1;
-    var lab, sub = "";
-    if(inst.t==="brk"){
-      lab = "S"+pad(idx,2);
-      if(brk.kind==="preset"){ var hits = brk.map[i]||[]; sub = hits.length? hits[0][0] : ""; }
-    } else if(inst.t==="kit"){ lab = "S"+pad(idx,2); sub = KITLIST[i]; }
-    else { lab = midiToNote(36+i); sub = ""; }
-    var act = padHot[i] && (now()-padHot[i] < 140);
-    panel(cx,cy,pw-1,phh-1, act?WHITE:BLUE, act);
-    textC(cx,cy+((phh-9)>>1)-4,pw-1,lab, act?BLUE:WHITE);
-    if(sub) textC(cx,cy+((phh-9)>>1)+5,pw-1,sub.substr(0,6), act?BLUE:ORANGE);
-    (function(i,idx){
-      hit(cx,cy,pw,phh,{ down:function(){ hitPad(ch,i,idx); } });
-    })(i,idx);
+  /* ---- lane controls ---- */
+  var cy2 = y0+h-ctlH, bw = Math.floor(W/3), d = proj.lane[laneSel];
+  hbar(0,cy2,bw-1,15, d.vol, "VOL", null, function(v){ d.vol=v; applyMix(); touch(); mark(); });
+  hbar(bw,cy2,bw-1,15, d.tone, "TONE", null, function(v){ d.tone=v; applyMix(); touch(); mark(); });
+  hbar(bw*2,cy2,W-bw*2,15, d.fx, "FX", null, function(v){ d.fx=v; applyMix(); touch(); mark(); });
+  var by = cy2+16, b3 = Math.floor(W/3);
+  if(laneSel===1||laneSel===2){
+    button(0,by,b3-1,16,"ROLL",function(){ armRoll=!armRoll; mark(); }, armRoll);
+    stepper(b3,by,b3-1,16,"KEY "+KEYNAME[proj.key],
+      function(){ proj.key=(proj.key+11)%12; touch(); mark(); },
+      function(){ proj.key=(proj.key+1)%12; touch(); mark(); });
+  } else {
+    button(0,by,b3-1,16,"REV",function(){ armRev=!armRev; mark(); }, armRev);
+    button(b3,by,b3-1,16,"ROLL",function(){ armRoll=!armRoll; mark(); }, armRoll);
   }
+  button(b3*2,by,W-b3*2,16,"CLEAR",function(){
+    askConfirm("CLEAR "+LANE[laneSel]+"?", function(){
+      proj.scenes[sc][laneSel] = emptyLane(); touch(); mark();
+    });
+  });
 }
 var padHot = {};
-function hitPad(ch,i,idx){
-  padHot[i] = now();
-  var inst = proj.inst[proj.chan[ch].inst];
-  var cell;
-  if(inst.t==="brk"||inst.t==="kit") cell = {n:"S"+pad(idx,2), i:proj.chan[ch].inst, f:"", v:0};
-  else cell = {n:midiToNote(36+i), i:proj.chan[ch].inst, f:"", v:0};
-  lastCell[ch] = cell;
-  audition(ch, cell);
-  if(recOn && play.on) recordCell(ch, cell);
-  mark();
-}
-function recordCell(ch, cell){
-  var ph = playhead();
-  if(!ph) return;
-  var t = ac.currentTime, rd = rowDur();
-  var pos = ph.pos, row = ph.row;
-  if(t-ph.t > rd*0.5){ row++; if(row>=ROWS){ row=0; pos = (pos+1)%proj.song.length; } }
-  var id = proj.song[pos][ch];
-  if(id<0){ var nn = patNew(ch); if(nn<0) return; proj.song[pos][ch]=nn; id=nn; }
-  proj.pat[id].rows[row] = {n:cell.n,i:cell.i,f:cell.f,v:cell.v};
-  editPat[ch] = id;
-  touch();
-}
-function cycleBreak(ch,d){
-  var cur = 0;
-  for(var i=0;i<LIB.length;i++) if(LIB[i].id===proj.chan[ch].brk) cur = i;
-  cur = (cur+d+LIB.length)%LIB.length;
-  proj.chan[ch].brk = LIB[cur].id;
-  libSel = cur; touch(); mark();
-}
 
-/* -------------------------------------------------------------- CHOP */
+/* --------------------------------------------------------------- BREAK */
 var wavePeaks = null, wavePeaksFor = null;
 function peaksFor(brk, n){
   var key = brk.id+":"+n+":"+brk.start+":"+brk.end;
@@ -1954,45 +1842,48 @@ function peaksFor(brk, n){
   wavePeaks = out; wavePeaksFor = key;
   return out;
 }
-function drawChop(){
+function pickBreak(d){
+  libSel = (libSel+d+LIB.length)%LIB.length;
+  proj.brk = LIB[libSel].id;
+  chopSel = 0; touch(); mark();
+}
+function drawBreak(){
   var y0 = contentTop(), h = contentH();
   rect(0,y0,W,h,BLUE);
-  var ch = chanSel;
   if(libSel>=LIB.length) libSel = 0;
+  if(LIB[libSel].id!==proj.brk){
+    for(var i=0;i<LIB.length;i++) if(LIB[i].id===proj.brk) libSel = i;
+  }
   var brk = LIB[libSel];
-  stepper(0,y0,W-56,11, brk.name+" "+(libSel+1)+"/"+LIB.length,
-    function(){ libSel=(libSel+LIB.length-1)%LIB.length; mark(); },
-    function(){ libSel=(libSel+1)%LIB.length; mark(); });
-  button(W-54,y0,26,11,"USE",function(){ proj.chan[ch].brk = brk.id; touch(); toast("SET"); });
-  button(W-27,y0,26,11,"IMP",doImport);
+  var smp = (brk.kind==="smp");
+  var stack = smp? 66 : 19;
+  stepper(0,y0,W-40,14, brk.name+"  "+(libSel+1)+"/"+LIB.length,
+    function(){ pickBreak(-1); }, function(){ pickBreak(1); });
+  button(W-38,y0,37,14,"LOAD",doImport);
 
-  var CTRLH = 67;
-  var wy = y0+13, wh = Math.max(40, h-13-CTRLH);
+  var wy = y0+16, wh = h-16-stack-2;
   panel(0,wy,W,wh,BLUE,true);
-  if(brk.kind==="smp"){
+  if(smp){
     var pk = peaksFor(brk, W-4);
     if(pk){
-      var mid = wy+(wh>>1), amp = (wh>>1)-3;
-      var mx = 0.0001; for(var i=0;i<pk.length;i++) if(pk[i]>mx) mx=pk[i];
+      var mid = wy+(wh>>1), amp = (wh>>1)-3, mx = 0.0001;
+      for(var i=0;i<pk.length;i++) if(pk[i]>mx) mx=pk[i];
       for(var i=0;i<pk.length;i++){
         var v = Math.round(pk[i]/mx*amp);
         rect(2+i,mid-v,1,v*2+1,WHITE);
       }
     }
-    /* slice markers */
     var span = brk.end-brk.start;
-    for(var s=0;s<brk.slices.length;s++){
-      var sx = 2+Math.round((brk.slices[s].t-brk.start)/span*(W-4));
-      rect(sx,wy+1,1,wh-2, s===chopSel?ORANGE:BLACK);
-      if(s===chopSel){ rect(sx-1,wy+1,3,3,ORANGE); }
-      if(brk.slices.length<=16) text(sx+1,wy+2,pad(s+1,2), s===chopSel?ORANGE:BLACK);
+    for(var s2=0;s2<brk.slices.length;s2++){
+      var sx = 2+Math.round((brk.slices[s2].t-brk.start)/span*(W-4));
+      rect(sx,wy+1,1,wh-2, s2===chopSel?ORANGE:BLACK);
+      if(brk.slices.length<=16) text(sx+1,wy+2,pad(s2+1,2), s2===chopSel?ORANGE:BLACK);
     }
     hit(0,wy,W,wh,{
       down:function(lx){
-        var t = brk.start + clamp((lx-2)/(W-4),0,1)*span;
-        var best=0, bd=1e9;
-        for(var s=0;s<brk.slices.length;s++){ var d=Math.abs(brk.slices[s].t-t); if(d<bd){bd=d;best=s;} }
-        chopSel = best; auditionBreakSlice(brk, best); mark();
+        var t = brk.start + clamp((lx-2)/(W-4),0,1)*span, best=0, bd=1e9;
+        for(var k=0;k<brk.slices.length;k++){ var dd=Math.abs(brk.slices[k].t-t); if(dd<bd){bd=dd;best=k;} }
+        chopSel = best; auditionSlice(brk,best); mark();
       },
       drag:function(lx){
         var t = brk.start + clamp((lx-2)/(W-4),0,1)*span;
@@ -2002,420 +1893,171 @@ function drawChop(){
           brk.slices[chopSel].t = clamp(snapToOnset(brk,t), lo, hi);
           touch(); mark();
         }
-      }
+      },
+      up:function(){ dbPutBreak(brk); }
     });
   } else {
-    /* preset break: show the slice map */
+    var cols = 4, cw = Math.floor((W-4)/cols), ch2 = Math.floor((wh-4)/4);
     for(var i=0;i<16;i++){
-      var ch4 = Math.floor((wh-4)/4);
-      var cx = 2+(i%4)*Math.floor((W-4)/4), cy = wy+2+Math.floor(i/4)*ch4;
-      var hits = brk.map[i]||[];
-      var lab = hits.length? hits[0][0] : "-";
+      var cx = 2+(i%cols)*cw, cy = wy+2+Math.floor(i/cols)*ch2;
+      var hits = brk.map[i]||[], lab = hits.length? hits[0][0] : "-";
       var selp = (chopSel===i);
-      panel(cx,cy,Math.floor((W-4)/4)-2,ch4-2, selp?WHITE:BLUE, selp);
-      text(cx+2,cy+2,"S"+pad(i+1,2), selp?BLUE:ORANGE);
-      text(cx+2,cy+11,lab.substr(0,6), selp?BLUE:WHITE);
-      (function(i,cx,cy,ch4){ hit(cx,cy,Math.floor((W-4)/4)-2,ch4-2,{tap:function(){ chopSel=i; auditionBreakSlice(brk,i); mark(); }}); })(i,cx,cy,ch4);
+      (function(i,cx,cy){
+        panel(cx,cy,cw-2,ch2-2, selp?WHITE:BLUE, selp);
+        text(cx+2,cy+2,pad(i+1,2), selp?BLUE:ORANGE);
+        text(cx+2,cy+11,lab.substr(0,6), selp?BLUE:WHITE);
+        hit(cx,cy,cw-2,ch2-2,{tap:function(){ chopSel=i; auditionSlice(brk,i); mark(); }});
+      })(i,cx,cy);
     }
   }
 
-  var iy = wy+wh+2;
-  text(2,iy+2,"BARS",WHITE);
-  stepper(30,iy,44,11, ""+brk.bars,
-    function(){ brk.bars = Math.max(1,brk.bars/2); brk.bpm = brk.kind==="smp"?breakBpm(brk):brk.bpm; touch(); mark(); },
-    function(){ brk.bars = Math.min(8,brk.bars*2); brk.bpm = brk.kind==="smp"?breakBpm(brk):brk.bpm; touch(); mark(); });
-  text(80,iy+2,"BPM",WHITE);
-  text(102,iy+2,pad(Math.round(brk.bpm||0),3),ORANGE);
-  button(W-52,iy,50,11,"TO BPM",function(){ proj.bpm = clamp(Math.round(brk.bpm),120,200); touch(); toast("BPM"); });
-
-  var by = iy+13, bw = Math.floor(W/4);
-  button(0,by,bw-1,12,"EQ8", function(){ if(brk.kind==="smp"){ sliceEqual(brk,8); dbPutBreak(brk); touch(); mark(); } });
-  button(bw,by,bw-1,12,"EQ16",function(){ if(brk.kind==="smp"){ sliceEqual(brk,16); dbPutBreak(brk); touch(); mark(); } });
-  button(bw*2,by,bw-1,12,"EQ32",function(){ if(brk.kind==="smp"){ sliceEqual(brk,32); dbPutBreak(brk); touch(); mark(); } });
-  button(bw*3,by,W-bw*3,12,"TRANS",function(){ if(brk.kind==="smp"){ sliceTrans(brk,sens); dbPutBreak(brk); touch(); mark(); } });
-
-  var sy = by+14;
-  text(2,sy+3,"SENS",WHITE);
-  hbar(30,sy,W-32,11,sens,null,hx(Math.round(sens*255),2),function(v){ sens=v; mark(); });
-
-  var py = sy+13;
-  var sl = (brk.kind==="smp")? brk.slices[chopSel] : null;
-  text(2,py+3,"PIT",WHITE);
-  stepper(24,py,40,11, sl? (sl.p>0?"+":"")+sl.p : "0",
-    function(){ if(sl){ sl.p--; touch(); mark(); } }, function(){ if(sl){ sl.p++; touch(); mark(); } });
-  button(66,py,32,11,"REV",function(){ if(sl){ sl.r = sl.r?0:1; touch(); mark(); } }, sl&&sl.r);
-  text(100,py+3,"GAIN",WHITE);
-  hbar(126,py,W-128,11, sl? sl.g/2 : 0.5, null, sl? hx(Math.round(sl.g*128),2):"--",
-    function(v){ if(sl){ sl.g = v*2; touch(); mark(); } });
-
-  var ay = py+13, aw = Math.floor(W/3);
-  button(0,ay,aw-1,13,"SPREAD",function(){ spread(); });
-  button(aw,ay,aw-1,13,"KIT",exportKit);
-  button(aw*2,ay,W-aw*2,13,"DEL",function(){
-    if(brk.kind!=="smp"){ toast("NO"); return; }
-    askConfirm("DELETE?",function(){
-      dbDel("library",brk.id);
-      LIB.splice(libSel,1); libSel=0;
-      for(var c=0;c<NCH;c++) if(!libHas(proj.chan[c].brk)) proj.chan[c].brk = LIB[0].id;
-      wavePeaksFor=null; touch(); mark();
+  var b3 = Math.floor(W/3), fy = y0+h-17;
+  if(smp){
+    var iy = y0+h-stack;
+    text(2,iy+3,"BARS",WHITE);
+    stepper(30,iy,52,13, ""+brk.bars,
+      function(){ brk.bars = Math.max(1,Math.round(brk.bars/2)); reslice(brk); },
+      function(){ brk.bars = Math.min(8,brk.bars*2); reslice(brk); });
+    text(88,iy+3,"BPM",WHITE);
+    text(110,iy+3,pad(Math.round(brk.bpm||proj.bpm),3),ORANGE);
+    button(W-56,iy,55,13,"USE BPM",function(){
+      proj.bpm = clamp(Math.round(brk.bpm||proj.bpm),120,200); applyMix(); touch(); toast("BPM"); });
+    var sy = iy+15, b4 = Math.floor(W/4);
+    button(0,sy,b4-1,13,"8",   function(){ setSlices(brk,8); },  brk.n===8);
+    button(b4,sy,b4-1,13,"16", function(){ setSlices(brk,16); }, brk.n===16);
+    button(b4*2,sy,b4-1,13,"32",function(){ setSlices(brk,32); },brk.n===32);
+    button(b4*3,sy,W-b4*3,13,"AUTO",function(){
+      sliceTrans(brk,sens); chopSel=0; wavePeaksFor=null; dbPutBreak(brk); touch(); mark(); });
+    hbar(0,sy+15,W-1,13, sens, "SENS", null, function(v){ sens=v; mark(); });
+    button(0,fy,b3*2-1,16,"FILL BEAT",function(){ doFill(); });
+    button(b3*2,fy,W-b3*2,16,"DELETE",function(){
+      askConfirm("DELETE?",function(){
+        dbDel("library",brk.id);
+        LIB.splice(libSel,1); libSel = 0;
+        proj.brk = LIB[0].id;
+        wavePeaksFor = null; touch(); mark();
+      });
     });
-  });
+  } else {
+    button(0,fy,W-1,16,"FILL BEAT",function(){ doFill(); });
+  }
 }
-function auditionBreakSlice(brk, i){
+function doFill(){
+  var bars = fillBreak();
+  scrn = 0; laneSel = 0;
+  toast(bars>1? "FILLED "+bars : "FILLED");
+}
+function setSlices(brk,n){
+  if(brk.kind!=="smp"){ toast("NO SAMPLE"); return; }
+  sliceEqual(brk,n); chopSel = 0; wavePeaksFor = null; dbPutBreak(brk); touch(); mark();
+}
+function reslice(brk){
+  if(brk.kind==="smp"){
+    var r = SAMPLES[brk.sid];
+    if(r) brk.end = Math.min(r.dur, brk.start + brk.bars*4*60/Math.max(60,brk.bpm||proj.bpm));
+    brk.bpm = breakBpm(brk);
+    sliceEqual(brk, Math.min(32,16*brk.bars));
+    wavePeaksFor = null; dbPutBreak(brk);
+  }
+  touch(); mark();
+}
+function auditionSlice(brk,i){
   audioUnlock();
-  var inst = null;
-  for(var k=0;k<proj.inst.length;k++) if(proj.inst[k].t==="brk"){ inst = proj.inst[k]; break; }
-  if(!inst) return;
-  E.trigger({ ch:chanSel, inst:inst, when:ac.currentTime+0.005, dur:rowDur()*4, vel:1, fx:{},
+  if(!E) return;
+  E.trigger({ ch:0, inst:INST.brk, when:ac.currentTime+0.005, dur:stepDur()*4, vel:1, fx:{},
               brk:brk, slice:i+1, buf: brk.kind==="smp"? sampleBuf(E,brk.sid):null });
 }
-/* SPREAD: slices land on the grid step that matches their position in the
-   break, so the loop plays back in time at the song tempo. */
-function spread(){
-  var ch = chanSel, id = curPat(ch), rows = proj.pat[id].rows;
-  var brk = libFind(proj.chan[ch].brk);
-  var inst = proj.chan[ch].inst;
-  for(var i=0;i<ROWS;i++) rows[i] = null;
-  if(brk.kind==="preset"){
-    var g = brk.groove;
-    for(var i=0;i<ROWS;i++) rows[i] = { n:"S"+pad(g[i%g.length],2), i:inst, f:"", v:0 };
-    toast("SPREAD");
-  } else {
-    var span = Math.max(0.001, brk.end-brk.start), steps = brk.bars*16, over = 0;
-    for(var i=0;i<brk.slices.length;i++){
-      var r = Math.round((brk.slices[i].t-brk.start)/span*steps);
-      if(r<0) r = 0;
-      if(r>=ROWS){ over++; continue; }
-      rows[r] = { n:"S"+pad(i+1,2), i:inst, f:"", v:0 };
-    }
-    toast(over? "2 BARS ONLY" : "SPREAD");
-  }
-  touch();
-  scrn = 1; mark();
-}
 
-/* -------------------------------------------------------------- INST */
-function drawInst(){
-  var y0 = contentTop(), h = contentH();
-  rect(0,y0,W,h,BLUE);
-  instSel = clamp(instSel,0,proj.inst.length-1);
-  var it = proj.inst[instSel], def = INSTDEF[it.t];
-  stepper(0,y0,W-56,11, (it.n===def.lab? it.n : it.n+" "+def.lab),
-    function(){ instSel=(instSel+proj.inst.length-1)%proj.inst.length; mark(); },
-    function(){ instSel=(instSel+1)%proj.inst.length; mark(); });
-  button(W-54,y0,26,11,"USE",function(){ proj.chan[chanSel].inst = instSel; chanCell(chanSel).i = instSel; touch(); toast("SET"); });
-  button(W-27,y0,26,11,"PLAY",function(){
-    audioUnlock();
-    E.trigger({ch:chanSel,inst:it,when:ac.currentTime+0.01,dur:0.5,vel:1,fx:{},midi:48,slice:1,
-               brk:libFind(proj.chan[chanSel].brk), buf:null});
-  });
-
-  var y = y0+14;
-  var rh = clamp(Math.floor((h-26)/def.p.length), 14, 30);
-  for(var i=0;i<def.p.length;i++){
-    var pd = def.p[i], k = pd[0], lo = pd[1], hi = pd[2], st = pd[4];
-    var v = it.p[k]; if(v==null) v = pd[3];
-    var norm = (v-lo)/(hi-lo);
-    var disp;
-    if(it.t==="chord"&&k==="TYPE") disp = CHORDNAME[Math.round(v)%CHORDNAME.length];
-    else if(hi<=2.001&&st<0.1) disp = (Math.round(v*100)/100).toFixed(2);
-    else if(st>=1) disp = ""+Math.round(v);
-    else disp = (Math.round(v*1000)/1000).toFixed(3);
-    text(2,y+((rh-8)>>1),k,WHITE);
-    (function(it,k,lo,hi,st,y,rh){
-      hbar(46,y,W-48,rh-3,norm,null,disp,function(nv){
-        var val = lo+nv*(hi-lo);
-        val = Math.round(val/st)*st;
-        it.p[k] = clamp(val,lo,hi);
-        touch(); mark();
-      });
-    })(it,k,lo,hi,st,y,rh);
-    y += rh;
-  }
-  text(2,y+4,"CH "+chanShort(chanSel)+" USES "+proj.inst[proj.chan[chanSel].inst].n, ORANGE);
-}
-
-/* --------------------------------------------------------------- MIX */
-function drawMix(){
-  var y0 = contentTop(), h = contentH();
-  rect(0,y0,W,h,BLUE);
-  var cw = Math.floor(W/NCH), fh = Math.max(40, Math.min(120, h-104));
-  for(var c=0;c<NCH;c++){
-    var x = c*cw;
-    var cd = proj.chan[c];
-    var sel = (mixSel===c);
-    panel(x,y0,cw-1,10, sel?WHITE:BLUE, sel);
-    textC(x,y0+2,cw-1,chanShort(c), sel?BLUE:WHITE);
-    (function(c){ hit(x,y0,cw,10,{tap:function(){ mixSel=c; chanSel=c; mark(); }}); })(c);
-    (function(c,cd){
-      vfader(x+2,y0+12,cw-5,fh,cd.vol,function(v){ cd.vol=v; applyMix(); touch(); mark(); });
-    })(c,cd);
-    var by = y0+12+fh+2;
-    (function(c,cd){
-      button(x+2,by,((cw-5)>>1),11,"M",function(){ cd.mute=!cd.mute; applyMix(); touch(); mark(); }, cd.mute);
-      button(x+2+((cw-5)>>1),by,((cw-5)>>1),11,"S",function(){ cd.solo=!cd.solo; applyMix(); touch(); mark(); }, cd.solo);
-    })(c,cd);
-  }
-  var cd2 = proj.chan[mixSel];
-  var y = y0+h-77, rh = 11;
-  var names = ["CUT","RES","CRU","DLY","REV"], keys = ["cut","res","crush","dly","rev"];
-  for(var i=0;i<names.length;i++){
-    text(2,y+2,names[i],ORANGE);
-    (function(k){
-      hbar(26,y,W-28,rh-1,cd2[k],null,hx(Math.round(cd2[k]*255),2),function(v){ cd2[k]=v; applyMix(); touch(); mark(); });
-    })(keys[i]);
-    y += rh;
-  }
-  text(2,y+2,"SWG",ORANGE);
-  hbar(26,y,W-28,rh-1,proj.swing/75,null,Math.round(proj.swing)+"%",function(v){ proj.swing = Math.round(v*75); touch(); mark(); });
-  y += rh;
-  text(2,y+2,"MST",ORANGE);
-  hbar(26,y,W-28,rh-1,proj.master==null?0.85:proj.master,null,hx(Math.round((proj.master==null?0.85:proj.master)*255),2),
-    function(v){ proj.master = v; applyMix(); touch(); mark(); });
-}
-function applyMix(){
-  if(!E) return;
-  E.master.gain.value = (proj.master==null?0.85:proj.master);
-  E.setDelayTime(60/proj.bpm*0.75);
-  for(var c=0;c<NCH;c++){
-    var cd = proj.chan[c];
-    var m = { vol:cd.vol, cut:cd.cut, res:cd.res, crush:cd.crush, dly:cd.dly, rev:cd.rev, mute:!chanActive(c) };
-    E.setMix(c,m);
-  }
-}
-
-/* -------------------------------------------------------------- DISK */
+/* ---------------------------------------------------------------- SAVE */
 var projList = [], listLoaded = false;
-/* the machine line: build, the insets iOS reports, screen, display mode */
+function refreshList(){
+  dbAll("projects",function(r){
+    projList = r.filter(function(p){ return p && p.ver===2 && p.scenes; });   /* v1 tracker songs are not loadable */
+    listLoaded = true; mark();
+  });
+}
 function drawStatus(y){
   var i = insets();
-  var s = "B"+BUILD+" T"+Math.round(i.t)+" B"+Math.round(i.b)+
-          " "+screen.width+"X"+screen.height+" "+W+"X"+H+(standalone()?" SA":"");
-  text(2,y,s,ORANGE);
+  text(2,y,"B"+BUILD+" T"+Math.round(i.t)+" B"+Math.round(i.b)+
+           " "+screen.width+"X"+screen.height+" "+W+"X"+H+(standalone()?" SA":""), ORANGE);
 }
-function refreshList(){ dbAll("projects",function(r){ projList = r; listLoaded = true; mark(); }); }
-function drawDisk(){
+function drawSave(){
   var y0 = contentTop(), h = contentH();
   rect(0,y0,W,h,BLUE);
   if(!listLoaded) refreshList();
-  var bw = Math.floor(W/4);
-  button(0,y0,bw-1,13,"SAVE",function(){ saveProject(false); refreshList(); });
-  button(bw,y0,bw-1,13,"NEW",function(){
+  var b3 = Math.floor(W/3);
+  button(0,y0,b3-1,15,"SAVE",function(){ saveProject(false); refreshList(); });
+  button(b3,y0,b3-1,15,"NEW",function(){
     askConfirm("NEW SONG?",function(){ proj = demoProject(true); applyMix(); toast("NEW"); mark(); });
   });
-  button(bw*2,y0,bw-1,13,"NAME",function(){ openKeyboard(proj.name,function(v){ proj.name=v; touch(); mark(); }); });
-  button(bw*3,y0,W-bw*3,13,"MET",function(){ metOn=!metOn; mark(); }, metOn);
-  var y = y0+15;
-  button(0,y,bw-1,13,"EXP",exportJSON);
-  button(bw,y,bw-1,13,"IMP",doImport);
-  button(bw*2,y,bw-1,13,"WAV",renderWAV);
-  button(bw*3,y,W-bw*3,13,"DEMO",function(){
+  button(b3*2,y0,W-b3*2,15,"NAME",function(){
+    openKeyboard(proj.name,function(v){ proj.name=v; touch(); mark(); });
+  });
+  var y = y0+17;
+  button(0,y,b3-1,15,"WAV",renderWAV);
+  button(b3,y,b3-1,15,"SEND",exportJSON);
+  button(b3*2,y,W-b3*2,15,"DEMO",function(){
     askConfirm("LOAD DEMO?",function(){ proj = demoProject(false); applyMix(); toast("DEMO"); mark(); });
   });
+  y += 19;
+  text(2,y+3,"SWING",WHITE);
+  hbar(40,y,W-42,13, proj.swing/75, null, Math.round(proj.swing)+"%",
+    function(v){ proj.swing = Math.round(v*75); touch(); mark(); });
   y += 15;
-  button(0,y,bw-1,13,"MIDI",initMIDI,midiOn);
-  button(bw,y,bw-1,13,"KIT",exportKit);
-  y += 16;
+  text(2,y+3,"LEVEL",WHITE);
+  hbar(40,y,W-42,13, proj.master, null, null,
+    function(v){ proj.master=v; applyMix(); touch(); mark(); });
+  y += 17;
+  button(0,y,b3-1,14,"MET",function(){ metOn=!metOn; mark(); }, metOn);
+  button(b3,y,b3-1,14,"MIDI",initMIDI,midiOn);
+  button(b3*2,y,W-b3*2,14,"KIT",exportKit);
+  y += 18;
   text(2,y,proj.name.substr(0,16),ORANGE);
-  text(W-tw("SONGS")-2,y,"SONGS",WHITE);
-  drawStatus(y0+h-8);
-  y += 10;
+  textR(W-2,y,"SONGS",WHITE);
+  y += 9;
   rect(0,y-2,W,1,BLACK);
-  for(var i=0;i<projList.length && y<y0+h-12;i++){
+  for(var i=0;i<projList.length && y<y0+h-18;i++){
     (function(p,y){
       var on = (p.name===proj.name);
-      panel(0,y,W,12,on?WHITE:BLUE,on);
-      text(3,y+3,p.name.substr(0,18), on?BLUE:WHITE);
-      textR(W-3,y+3, pad(p.bpm,3), on?BLUE:ORANGE);
-      hit(0,y,W,12,{
+      panel(0,y,W,14,on?WHITE:BLUE,on);
+      text(3,y+4,p.name.substr(0,18), on?BLUE:WHITE);
+      textR(W-3,y+4, pad(p.bpm,3), on?BLUE:ORANGE);
+      hit(0,y,W,14,{
         tap:function(){ askConfirm("LOAD?",function(){ loadProjectJSON(p); }); },
         hold:function(){ askConfirm("DELETE?",function(){ dbDel("projects",p.name,refreshList); }); }
       });
     })(projList[i], y);
-    y += 13;
+    y += 15;
   }
-}
-/* ------------------------------------------------------------ DRAWER */
-var FXLIST = ["--","9","R","B","P","G","C","T","V"];
-var drwOct = 3;
-
-function openDrawer(ch,pid,row){
-  drawer = { ch:ch, pid:pid, row:row };
-  var c = proj.pat[pid].rows[row];
-  if(c && c.n && c.n.charAt(0)!=="S" && c.n!=="OFF"){
-    var o = parseInt(c.n.charAt(2),10);
-    if(!isNaN(o)) drwOct = o;
-  }
-  mark();
-}
-function drwCell(create){
-  var p = proj.pat[drawer.pid];
-  var c = p.rows[drawer.row];
-  if(!c && create){
-    var lc = chanCell(drawer.ch);
-    c = { n:lc.n, i:proj.chan[drawer.ch].inst, f:"", v:0 };
-    p.rows[drawer.row] = c;
-  }
-  return c;
-}
-function drawDrawer(){
-  if(!drawer) return;
-  hit(0,0,W,H,{tap:function(){}, hold:function(){}});
-  var h = 104, y = H-TAB-h;
-  rect(0,y-2,W,h+2,BLACK);
-  panel(0,y,W,h,BLUE,false);
-  var c = drwCell(false);
-  var cell = c || {n:"---",i:proj.chan[drawer.ch].inst,f:"",v:0};
-  var inst = proj.inst[cell.i] || proj.inst[0];
-
-  text(3,y+3,"ROW "+hx(drawer.row,2),ORANGE);
-  text(50,y+3,cell.n+"  "+hx(cell.i,1)+"  "+(cell.f?cell.f+hx(cell.v,2):"---"),WHITE);
-  button(W-15,y+1,14,10,I_X,function(){ drawer=null; mark(); });
-
-  var py = y+13;
-  var kind = (inst.t==="brk"||inst.t==="kit");
-  if(kind){
-    var pw = Math.floor(W/8), ph2 = 15;
-    for(var i=0;i<16;i++){
-      var cx = (i%8)*pw, cy = py+Math.floor(i/8)*ph2;
-      var nm = "S"+pad(i+1,2);
-      (function(nm,cx,cy,pw,ph2){
-        var on = (cell.n===nm);
-        panel(cx,cy,pw-1,ph2-1,on?WHITE:BLUE,on);
-        textC(cx,cy+((ph2-8)>>1),pw-1,nm.substr(1),on?BLUE:WHITE);
-        hit(cx,cy,pw,ph2,{tap:function(){
-          var cc = drwCell(true); cc.n = nm; lastCell[drawer.ch] = {n:cc.n,i:cc.i,f:cc.f,v:cc.v};
-          audition(drawer.ch,cc); touch(); mark();
-        }});
-      })(nm,cx,cy,pw,ph2);
-    }
-  } else {
-    var nw = Math.floor(W/6), nh = 15;
-    for(var i=0;i<12;i++){
-      var cx = (i%6)*nw, cy = py+Math.floor(i/6)*nh;
-      var nm = NOTENAMES[i]+drwOct;
-      (function(nm,cx,cy,nw,nh){
-        var on = (cell.n===nm);
-        panel(cx,cy,nw-1,nh-1,on?WHITE:BLUE,on);
-        textC(cx,cy+((nh-8)>>1),nw-1,nm,on?BLUE:WHITE);
-        hit(cx,cy,nw,nh,{tap:function(){
-          var cc = drwCell(true); cc.n = nm; lastCell[drawer.ch] = {n:cc.n,i:cc.i,f:cc.f,v:cc.v};
-          audition(drawer.ch,cc); touch(); mark();
-        }});
-      })(nm,cx,cy,nw,nh);
-    }
-  }
-  var oy = py+31;
-  if(!kind){
-    stepper(0,oy,44,11,"OCT"+drwOct, function(){ drwOct=clamp(drwOct-1,2,5); mark(); },
-                                     function(){ drwOct=clamp(drwOct+1,2,5); mark(); });
-  } else {
-    text(3,oy+3,(inst.t==="kit")?KITLIST[(parseInt((cell.n||"S01").substr(1),10)||1)-1]:libFind(proj.chan[drawer.ch].brk).name,ORANGE);
-  }
-  stepper(46,oy,66,11,hx(cell.i,1)+" "+proj.inst[cell.i].n.substr(0,4),
-    function(){ var cc=drwCell(true); cc.i=(cc.i+proj.inst.length-1)%proj.inst.length; touch(); mark(); },
-    function(){ var cc=drwCell(true); cc.i=(cc.i+1)%proj.inst.length; touch(); mark(); });
-  button(114,oy,32,11,"OFF",function(){
-    var cc = drwCell(true); cc.n = "OFF"; touch(); mark();
-  }, cell.n==="OFF");
-  button(148,oy,32,11,"DEL",function(){
-    proj.pat[drawer.pid].rows[drawer.row] = null; touch(); mark();
-  });
-  button(W-40,oy,39,11,"OK",function(){ drawer=null; mark(); });
-
-  var fy = oy+13, fw = Math.floor(W/9);
-  for(var i=0;i<FXLIST.length;i++){
-    (function(f,x){
-      var on = ((cell.f||"--")===f) || (f==="--"&&!cell.f);
-      panel(x,fy,fw-1,12,on?WHITE:BLUE,on);
-      textC(x,fy+3,fw-1,f,on?BLUE:WHITE);
-      hit(x,fy,fw,12,{tap:function(){
-        var cc = drwCell(true);
-        cc.f = (f==="--")? "" : f;
-        if(cc.f&&!cc.v) cc.v = defFxVal(cc.f);
-        lastCell[drawer.ch] = {n:cc.n,i:cc.i,f:cc.f,v:cc.v};
-        touch(); mark();
-      }});
-    })(FXLIST[i], i*fw);
-  }
-  var vy = fy+14;
-  text(3,vy+3,"VAL",ORANGE);
-  hbar(26,vy,W-72,11, cell.v/255, null, hx(cell.v,2)+" "+fxHint(cell.f,cell.v),
-    function(v){ var cc=drwCell(true); cc.v = Math.round(v*255); touch(); mark(); });
-  tinyButton(W-44,vy,20,11,I_LT,function(){ var cc=drwCell(true); cc.v=clamp(cc.v-1,0,255); touch(); mark(); });
-  tinyButton(W-22,vy,21,11,I_RT,function(){ var cc=drwCell(true); cc.v=clamp(cc.v+1,0,255); touch(); mark(); });
-}
-function defFxVal(f){
-  switch(f){ case "9": return 32; case "R": return 3; case "B": return 1; case "P": return 12;
-             case "G": return 24; case "C": return 128; case "T": return 64; case "V": return 128; }
-  return 0;
-}
-function fxHint(f,v){
-  switch(f){
-    case "9": return Math.round(v/256*100)+"%";
-    case "R": return v+"T";
-    case "P": return ((v>127?v-256:v)>0?"+":"")+(v>127?v-256:v);
-    case "G": return Math.round(v*4)+"MS";
-    case "C": return Math.round(40*Math.pow(400,v/255))+"HZ";
-    case "T": return Math.round(12+v/255*100)+"MS";
-    case "V": return Math.round(v/128*100)+"%";
-  }
-  return "";
+  drawStatus(y0+h-8);
 }
 /* --------------------------------------------------------------- DEMO */
-function setRow(id,row,n,i,f,v){ proj.pat[id].rows[row] = {n:n,i:i,f:f||"",v:v||0}; }
-function fillGroove(id,inst,brk){
-  var g = brk.groove||groove(seq16());
-  for(var i=0;i<ROWS;i++) proj.pat[id].rows[i] = {n:"S"+pad(g[i%g.length],2), i:inst, f:"", v:0};
-}
 function demoProject(blank){
   var p = newProject(blank?"UNTITLED":"DUBPLATE");
   proj = p;
-  if(blank){
-    for(var i=0;i<4;i++) p.song.push(songRow());
-    editPat = [0,0,0,0,0,0];
-    for(var c=0;c<NCH;c++){ var id = patNew(c); editPat[c] = id; }
-    unsaved = false;
-    return p;
+  p.brk = "p0"; libSel = 0;
+  if(blank){ unsaved = false; play.scene = 0; return p; }
+
+  var g = libFind("p0").groove;
+  for(var i=0;i<STEPS;i++){
+    p.scenes[0][0][i] = { v:g[i], r:0, o:0 };
+    p.scenes[1][0][i] = { v:g[STEPS+i], r:0, o:0 };
   }
-  p.bpm = 170; p.swing = 14;
-  p.chan[0].crush = 0.35; p.chan[0].rev = 0.08;
-  p.chan[1].crush = 0.5; p.chan[1].dly = 0.18; p.chan[1].vol = 0.6;
-  p.chan[1].brk = "p1";
-  p.chan[2].vol = 0.85;
-  p.chan[3].vol = 0.6; p.chan[3].cut = 0.62; p.chan[3].rev = 0.1;
-  p.chan[4].vol = 0.55; p.chan[4].dly = 0.35; p.chan[4].rev = 0.3;
-  p.chan[5].vol = 0.5; p.chan[5].dly = 0.5; p.chan[5].rev = 0.35;
+  p.scenes[1][0][3].r = 1;                       /* a backwards snare */
+  p.scenes[1][0][13].o = 1;                      /* and a roll */
 
-  var pA = patNew(0), pA2 = patNew(0), pB = patNew(1), pS = patNew(2),
-      pR = patNew(3), pT = patNew(4), pF = patNew(5);
-  fillGroove(pA, 0, libFind("p0"));
-  fillGroove(pA2, 0, libFind("p0"));
-  /* the chopped second bar: rolls and a reverse */
-  setRow(pA2,16,"S01",0,"",0); setRow(pA2,17,"S13",0,"R",2); setRow(pA2,18,"S13",0,"",0);
-  setRow(pA2,19,"S05",0,"B",1); setRow(pA2,20,"S05",0,"",0); setRow(pA2,22,"S11",0,"",0);
-  setRow(pA2,24,"S13",0,"R",3); setRow(pA2,28,"S05",0,"",0); setRow(pA2,30,"S16",0,"P",249);
-  /* BRK2: think chops */
-  setRow(pB,4,"S05",0,"",0); setRow(pB,12,"S13",0,"B",1);
-  setRow(pB,20,"S05",0,"R",3); setRow(pB,26,"S07",0,"P",7); setRow(pB,30,"S13",0,"",0);
-  /* SUB */
-  setRow(pS,0,"C-2",1,"",0); setRow(pS,10,"C-2",1,"",0); setRow(pS,14,"G-2",1,"G",24);
-  setRow(pS,16,"C-2",1,"",0); setRow(pS,24,"D#2",1,"",0); setRow(pS,28,"C-2",1,"G",30);
-  /* REESE */
-  setRow(pR,0,"C-3",2,"",0); setRow(pR,12,"D#3",2,"G",40); setRow(pR,20,"C-3",2,"G",40);
-  setRow(pR,28,"A#2",2,"G",60);
-  /* STAB */
-  setRow(pT,6,"C-4",3,"V",160); setRow(pT,14,"C-4",3,"V",128);
-  setRow(pT,22,"D#4",3,"V",150); setRow(pT,30,"A#3",3,"V",120);
-  /* FX siren */
-  setRow(pF,0,"C-4",6,"",0); setRow(pF,24,"OFF",6,"",0);
+  function put(s,l,i,v){ p.scenes[s][l][i] = {v:v, r:0, o:0}; }
+  /* bass: root, root, up a fifth and hold */
+  put(0,1,0,0); put(0,1,6,0); put(0,1,10,3); put(0,1,11,3);
+  put(1,1,0,1); put(1,1,8,0); put(1,1,12,4);
+  /* stabs on the offbeat */
+  put(0,2,6,0); put(0,2,14,2);
+  put(1,2,2,3); put(1,2,10,0);
+  /* one siren */
+  put(1,3,0,0);
 
-  p.song.push([pA,-1,pS,-1,-1,-1]);
-  p.song.push([pA,-1,pS,pR,-1,-1]);
-  p.song.push([pA2,pB,pS,pR,pT,-1]);
-  p.song.push([pA2,pB,pS,pR,pT,pF]);
-  editPat = [pA,pB,pS,pR,pT,pF];
-  songSel = {pos:0,ch:0};
+  p.chain = true;
+  play.scene = 0;
   unsaved = false;
   return p;
 }
@@ -2454,20 +2096,17 @@ function initMIDI(){
 function onMIDI(e){
   var d = e.data;
   if(!d||d.length<3) return;
-  var cmd = d[0]&0xF0, note = d[1], vel = d[2];
-  if(cmd!==0x90||vel===0) return;
-  audioUnlock();
-  var ch = chanSel, inst = proj.inst[proj.chan[ch].inst], cell;
-  if(inst.t==="brk"||inst.t==="kit") cell = {n:"S"+pad(((note-36)&15)+1,2), i:proj.chan[ch].inst, f:"", v:0};
-  else cell = {n:midiToNote(clamp(note,36,83)), i:proj.chan[ch].inst, f:"", v:0};
-  lastCell[ch] = cell;
-  audition(ch, cell);
-  if(recOn&&play.on) recordCell(ch, cell);
-  padHot[((note-36)&15)] = now();
+  if((d[0]&0xF0)!==0x90||d[2]===0) return;
+  var pal = paletteInfo(laneSel);
+  var i = (d[1]-36) % pal.n;
+  if(i<0) i += pal.n;
+  padSel[laneSel] = i+pal.base;
+  padHot[laneSel*100+i] = now();
+  hitPad(laneSel, i+pal.base);
   mark();
 }
 
-/* ------------------------------------------------------------- UPDATE
+/* --------------------------------------------------------------- UPDATE
    A home screen app keeps the copy iOS installed, so the page checks the
    server for a newer build once per session and reloads itself. */
 function checkUpdate(){
@@ -2487,7 +2126,7 @@ function checkUpdate(){
   })["catch"](function(){});
 }
 
-/* --------------------------------------------------------------- BOOT */
+/* ----------------------------------------------------------------- BOOT */
 var unlocked = false;
 function audioUnlock(){
   if(!ac) return;
@@ -2500,15 +2139,13 @@ function audioUnlock(){
     }catch(e){}
   }
 }
-function autosave(){
-  if(unsaved && proj && dbReady) saveProject(true);
-}
+function autosave(){ if(unsaved && proj && dbReady) saveProject(true); }
 function restoreLast(){
   var n = null;
   try{ n = localStorage.getItem("dp.last"); }catch(e){}
   if(!n) return;
   dbAll("projects", function(rows){
-    for(var i=0;i<rows.length;i++) if(rows[i].name===n){ loadProjectJSON(rows[i]); return; }
+    for(var i=0;i<rows.length;i++) if(rows[i].name===n && rows[i].ver===2){ loadProjectJSON(rows[i]); return; }
   });
 }
 
@@ -2516,18 +2153,11 @@ function draw(){
   dirty = false;
   regions = [];
   rect(0,0,W,H,BLUE);
-  switch(scrn){
-    case 0: drawSong(); break;
-    case 1: drawPattern(); break;
-    case 2: drawPads(); break;
-    case 3: drawChop(); break;
-    case 4: drawInst(); break;
-    case 5: drawMix(); break;
-    default: drawDisk(); break;
-  }
+  if(scrn===1) drawBreak();
+  else if(scrn===2) drawSave();
+  else drawBeat();
   drawTransport();
   drawTabs();
-  if(drawer) drawDrawer();
   if(keyboard) drawKeyboard();
   drawToast();
   if(confirmBox) drawConfirm();
@@ -2547,9 +2177,9 @@ function boot(){
   try{ ac = new AC(); }catch(e){ ac = null; }
   if(ac) E = createEngine(ac);
   buildPresetLib();
+  buildInst();
   proj = demoProject(false);
   applyMix();
-  if(E) E.setDelayTime(60/proj.bpm*0.75);
   loadBaked();
   dbOpen(function(){ dbLoadLib(function(){ restoreLast(); mark(); }); });
   setInterval(autosave, 30000);
